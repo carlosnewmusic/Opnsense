@@ -84,6 +84,7 @@ function cleanup_vmid() {
 
 function cleanup() {
   local exit_code=$?
+  serial_reader_stop 2>/dev/null || true
   popd >/dev/null
   if [[ "${POST_TO_API_DONE:-}" == "true" && "${POST_UPDATE_DONE:-}" != "true" ]]; then
     if [[ $exit_code -eq 0 ]]; then
@@ -116,6 +117,7 @@ else
   TEMP_DIR=$(mktemp -d /var/tmp/opnsense-vm.XXXXXX)
 fi
 pushd $TEMP_DIR >/dev/null
+
 function send_line_to_vm() {
   echo -e "${DGN}Sending line: ${YW}$1${CL}"
   for ((i = 0; i < ${#1}; i++)); do
@@ -184,6 +186,72 @@ function send_line_to_vm() {
     qm sendkey $VMID "$character"
   done
   qm sendkey $VMID ret
+}
+
+# ---------------------------------------------------------------------------
+# Serial console helpers
+#
+# QEMU exposes the VM serial port as a UNIX socket at
+# /var/run/qemu-server/<vmid>.serial0. By continuously draining that socket
+# into a log file we can detect the login/password/shell prompts before
+# typing anything. This prevents the install commands being sent too early
+# (which previously landed on the login prompt, failed, and could trigger
+# the ERR trap -> cleanup_vmid -> VM destroyed).
+# ---------------------------------------------------------------------------
+SERIAL_LOG=""
+SERIAL_READER_PID=""
+
+function serial_reader_start() {
+  serial_reader_stop
+  SERIAL_LOG="${TEMP_DIR}/serial-${VMID}.log"
+  : > "$SERIAL_LOG"
+  if ! command -v socat >/dev/null 2>&1; then
+    msg_error "socat not found - serial prompt detection disabled"
+    msg_error "Install it with: apt install socat"
+    return 1
+  fi
+  # Wait for the serial socket to appear (it is created by QEMU at startup)
+  local i
+  for i in $(seq 1 30); do
+    [ -S "/var/run/qemu-server/${VMID}.serial0" ] && break
+    sleep 1
+  done
+  if [ ! -S "/var/run/qemu-server/${VMID}.serial0" ]; then
+    msg_error "Serial socket /var/run/qemu-server/${VMID}.serial0 not found"
+    return 1
+  fi
+  socat -u UNIX-CONNECT:"/var/run/qemu-server/${VMID}.serial0" - >>"$SERIAL_LOG" 2>/dev/null &
+  SERIAL_READER_PID=$!
+  # Give the reader a moment to actually attach
+  sleep 1
+  return 0
+}
+
+function serial_reader_stop() {
+  if [ -n "${SERIAL_READER_PID:-}" ] && kill -0 "$SERIAL_READER_PID" 2>/dev/null; then
+    kill "$SERIAL_READER_PID" 2>/dev/null || true
+    wait "$SERIAL_READER_PID" 2>/dev/null || true
+  fi
+  SERIAL_READER_PID=""
+}
+
+# wait_for_serial_pattern <regex> <timeout_seconds>
+# Returns 0 if the pattern appears in the serial log within the timeout.
+function wait_for_serial_pattern() {
+  local pattern="$1"
+  local timeout="${2:-600}"
+  local elapsed=0
+  if [ -z "$SERIAL_LOG" ] || [ ! -f "$SERIAL_LOG" ]; then
+    return 1
+  fi
+  while [ $elapsed -lt "$timeout" ]; do
+    if grep -qE "$pattern" "$SERIAL_LOG" 2>/dev/null; then
+      return 0
+    fi
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+  return 1
 }
 
 if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "OPNsense VM" --yesno "This will create a New OPNsense VM. Proceed?" 10 58); then
@@ -808,11 +876,52 @@ msg_ok "Bridge interfaces have been successfully added."
 msg_ok "Created a OPNsense VM ${CL}${BL}(${HN})"
 msg_ok "Starting OPNsense VM (Patience this takes 20-30 minutes)"
 qm start $VMID
-sleep 90
+
+# ---------------------------------------------------------------------------
+# FIX: wait for the FreeBSD guest to actually reach the login prompt before
+# sending any keystrokes. Sending commands too early landed them on the
+# login prompt, caused failures and (via the ERR trap) destroyed the VM.
+# ---------------------------------------------------------------------------
+
+# Start draining the serial console so we can watch for prompts.
+serial_reader_start || true
+
+msg_info "Waiting for FreeBSD login prompt (do not close the terminal)"
+if wait_for_serial_pattern "login: ?$" 600; then
+  msg_ok "FreeBSD login prompt detected"
+else
+  msg_error "Login prompt not detected within timeout - falling back to a fixed delay"
+  sleep 120
+fi
+
+# Log in as root
+msg_info "Logging in as root"
 send_line_to_vm "root"
-sleep 2
+
+# Wait for the password prompt (or the shell prompt if root is passwordless)
+if wait_for_serial_pattern "(Password:|root@)" 120; then
+  msg_ok "Password/shell prompt detected"
+else
+  msg_error "Password prompt not detected - proceeding anyway"
+  sleep 5
+fi
+
+# Empty password for the stock FreeBSD VM images
 send_line_to_vm ""
+
+# Wait for the root shell prompt before sending anything else
+if wait_for_serial_pattern "root@[^:]*:[^#]*#" 180; then
+  msg_ok "Root shell is ready"
+else
+  msg_error "Root shell prompt not detected - commands may not run correctly"
+  sleep 30
+fi
+
+# Now it is safe to send the install commands.
+msg_info "Fetching OPNsense bootstrap script"
 send_line_to_vm "fetch https://raw.githubusercontent.com/opnsense/update/master/src/bootstrap/opnsense-bootstrap.sh.in"
+sleep 8
+
 if [ -n "$WAN_BRG" ]; then
   msg_info "Adding WAN interface"
   qm set $VMID \
@@ -820,6 +929,7 @@ if [ -n "$WAN_BRG" ]; then
   msg_ok "WAN interface added"
   sleep 5 # Brief pause after adding network interface
 fi
+
 # FreeBSD 15+ VM images ship the base system as pkgbase packages; the bootstrap's
 # "delete all packages" step would remove the running base system (/bin/rm etc.)
 # and brick the VM. Deregister them from the pkg db first - the files stay in
@@ -884,8 +994,14 @@ while [ $build_stable -lt 6 ] && [ $build_elapsed -lt 2400 ]; do
   fi
 done
 msg_ok "OPNsense build finished after $((build_elapsed / 60)) minutes"
+
+# The bootstrap ends with a reboot into OPNsense and its console menu. Give
+# it a moment to settle, then log in again for the post-install menu steps.
+sleep 30
 send_line_to_vm "root"
+sleep 3
 send_line_to_vm "opnsense"
+sleep 3
 send_line_to_vm "2"
 
 if [ "$IP_ADDR" != "" ]; then
@@ -934,6 +1050,9 @@ fi
 sleep 10
 send_line_to_vm "0"
 msg_ok "Started OPNsense VM"
+
+# Free the serial socket now that we are done with it.
+serial_reader_stop || true
 
 msg_ok "Completed successfully!\n"
 if [ "$IP_ADDR" != "" ]; then
