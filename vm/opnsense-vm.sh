@@ -5,7 +5,11 @@
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 #
 # OPNsense VM - FreeBSD 14.x + bootstrap
-# Preconfigura la imagen para evitar el cuelgue de DHCP en la LAN.
+# ---------------------------------------------------------------------------
+# Estrategia: durante la instalación solo se añade la interfaz WAN (vmbr1)
+# para evitar el cuelgue de dhclient en la LAN. La LAN (vmbr0) se añade
+# después del bootstrap y se configura con IP estática.
+# ---------------------------------------------------------------------------
 
 LOG_FILE="${LOG_FILE:-/var/log/opnsense-vm-install.log}"
 DEBUG_SERIAL="${DEBUG_SERIAL:-0}"
@@ -13,7 +17,6 @@ KEEP_ON_ERROR="${KEEP_ON_ERROR:-0}"
 OPNSENSE_VERSION="${OPNSENSE_VERSION:-26.7}"
 FREEBSD_MAJOR="14"
 LAN_STATIC_IP="${LAN_STATIC_IP:-192.168.2.1}"
-LAN_STATIC_MASK="${LAN_STATIC_MASK:-255.255.255.0}"
 LAN_STATIC_PREFIX="${LAN_STATIC_PREFIX:-24}"
 
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
@@ -97,7 +100,6 @@ function cleanup() {
   local ec=$?
   log_info "cleanup() exit=$ec"
   serial_reader_stop 2>/dev/null || true
-  qemu_nbd_disconnect 2>/dev/null || true
   popd >/dev/null 2>&1 || true
   [[ "${POST_TO_API_DONE:-}" == "true" && "${POST_UPDATE_DONE:-}" != "true" ]] && {
     [ "$ec" -eq 0 ] && post_update_to_api "done" "none" 2>/dev/null || true
@@ -120,18 +122,11 @@ log_info "TEMP_DIR=$TEMP_DIR"
 pushd "$TEMP_DIR" >/dev/null
 
 SERIAL_LOG=""; SERIAL_READER_PID=""
-NBD_DEV="/dev/nbd0"
-
-function qemu_nbd_disconnect() {
-  if [ -e "$NBD_DEV" ]; then
-    qemu-nbd --disconnect "$NBD_DEV" &>/dev/null || true
-  fi
-}
 
 function serial_reader_start() {
   serial_reader_stop
   SERIAL_LOG="${TEMP_DIR}/serial-${VMID}.log"; : > "$SERIAL_LOG"
-  command -v socat >/dev/null 2>&1 || { log_err "socat no instalado"; return 1; }
+  command -v socat >/dev/null 2>&1 || { log_err "socat no instalado (apt install socat)"; return 1; }
   local sock="/var/run/qemu-server/${VMID}.serial0"
   for _ in $(seq 1 30); do [ -S "$sock" ] && break; sleep 1; done
   [ -S "$sock" ] || { log_err "Socket $sock no aparece"; return 1; }
@@ -195,7 +190,7 @@ function send_line_to_vm() {
   qm sendkey $VMID ret
 }
 
-# --- PROMPT INICIAL ---
+# --- PROMPT ---
 if ! whiptail --backtitle "Proxmox VE Helper Scripts" --title "OPNsense VM" \
      --yesno "Crear VM OPNsense (FreeBSD ${FREEBSD_MAJOR}.x + bootstrap)?" 10 58; then
   header_info && echo -e "⚠ Cancelado\n" && exit
@@ -322,80 +317,6 @@ FILE=FreeBSD.qcow2
 unxz -cv "$(basename "$URL")" > "$FILE" || { msg_error "Fallo al descomprimir"; exit 115; }
 rm -f "$(basename "$URL")"; msg_ok "Descomprimido: $FILE"
 
-# =============================================================================
-# FIX CRÍTICO: preconfigurar rc.conf dentro de la imagen para evitar el cuelgue
-# de dhclient en vtnet1 (LAN). Se le asigna IP estática desde el arranque.
-# =============================================================================
-log_step "[09b] Preconfigurando imagen (evitar cuelgue DHCP en LAN)"
-if ! command -v qemu-nbd >/dev/null 2>&1; then
-  log_warn "qemu-nbd no disponible, no se puede preconfigurar"
-else
-  modprobe nbd max_part=8 2>/dev/null || true
-  qemu_nbd_disconnect
-  if qemu-nbd --connect="$NBD_DEV" "$FILE" 2>/dev/null; then
-    sleep 3
-    partprobe "$NBD_DEV" 2>/dev/null || true
-    sleep 1
-    ROOT_PART=""; ROOT_SIZE=0
-    for p in ${NBD_DEV}p*; do
-      [ -b "$p" ] || continue
-      S=$(blockdev --getsize64 "$p" 2>/dev/null || echo 0)
-      log_info "  partición $p = $S bytes"
-      if [ "$S" -gt "$ROOT_SIZE" ]; then ROOT_SIZE=$S; ROOT_PART=$p; fi
-    done
-    log_info "Root candidata: $ROOT_PART ($ROOT_SIZE bytes)"
-    if [ -n "$ROOT_PART" ]; then
-      mkdir -p /mnt/opn-preconf
-      MOUNTED=0
-      for opt in "ufstype=ufs2,rw" "ufstype=ufs2,ro" "rw" "ro"; do
-        if mount -t ufs -o "$opt" "$ROOT_PART" /mnt/opn-preconf 2>/dev/null; then
-          MOUNTED=1; log_info "Montado con opciones: $opt"; break
-        fi
-      done
-      if [ "$MOUNTED" = "1" ]; then
-        RC=/mnt/opn-preconf/etc/rc.conf
-        if [ -f "$RC" ]; then
-          cp "$RC" "${RC}.orig" 2>/dev/null || true
-          # Eliminar DHCP por defecto y configs previas de vtnet0/vtnet1
-          grep -v '^ifconfig_DEFAULT=' "$RC" 2>/dev/null \
-            | grep -v '^ifconfig_vtnet0=' \
-            | grep -v '^ifconfig_vtnet1=' > "${RC}.new" || true
-          {
-            cat "${RC}.new"
-            echo ''
-            echo '# Añadido por el instalador OPNsense (evita cuelgue DHCP en LAN)'
-            echo 'ifconfig_vtnet0="DHCP"'
-            echo "ifconfig_vtnet1=\"inet ${LAN_STATIC_IP} netmask ${LAN_STATIC_MASK}\""
-            echo 'defaultrouter="NO"'
-          } > "$RC"
-          rm -f "${RC}.new"
-          log_info "rc.conf actualizado: vtnet1=${LAN_STATIC_IP}/${LAN_STATIC_PREFIX}"
-
-          # Forzar getty en consola serie (por si la imagen no lo trae)
-          TTYS=/mnt/opn-preconf/etc/ttys
-          if [ -f "$TTYS" ]; then
-            # Descomentar/cambiar ttyu0 a 'on' si está en 'onifconsole'
-            sed -i.bak -E 's|^(ttyu0[[:space:]]+.*[[:space:]])onifconsole([[:space:]].*)$|\1on\2|' "$TTYS" 2>/dev/null || true
-            # Si la línea está comentada, descomentarla
-            sed -i -E 's|^#(ttyu0[[:space:]]+"/usr/libexec/getty 3wire")|\1|' "$TTYS" 2>/dev/null || true
-            log_info "ttys: consola serie verificada"
-          fi
-          msg_ok "Imagen preconfigurada correctamente"
-        else
-          log_warn "No existe $RC dentro de la imagen"
-        fi
-        sync; umount /mnt/opn-preconf
-      else
-        log_warn "No se pudo montar $ROOT_PART (UFS). Se continúa sin preconfigurar"
-        log_warn "El arranque podría colgarse en DHCP de vtnet1"
-      fi
-    fi
-    qemu_nbd_disconnect
-  else
-    log_warn "qemu-nbd no pudo conectar $NBD_DEV"
-  fi
-fi
-
 # --- MAPEO STORAGE ---
 log_step "[10] Mapeando storage"
 STORAGE_TYPE=$(pvesm status -storage $STORAGE | awk 'NR>1 {print $2}')
@@ -404,31 +325,32 @@ nfs|dir)  DISK_EXT=".qcow2"; DISK_REF="$VMID/"; DISK_IMPORT="-format qcow2"; THI
 btrfs)    DISK_EXT=".raw";   DISK_REF="$VMID/"; DISK_IMPORT="-format raw";  FORMAT=",efitype=4m"; THIN="" ;;
 *)        DISK_EXT="";       DISK_REF="";        DISK_IMPORT="-format raw" ;;
 esac
-for i in {0,1}; do
-  eval DISK${i}=vm-${VMID}-disk-${i}${DISK_EXT:-}
-  eval DISK${i}_REF=${STORAGE}:${DISK_REF:-}\$DISK${i}
-done
-# Recalcular de forma limpia
-DISK0="vm-${VMID}-disk-0${DISK_EXT:-}"
-DISK1="vm-${VMID}-disk-1${DISK_EXT:-}"
-DISK0_REF="${STORAGE}:${DISK_REF:-}${DISK0}"
-DISK1_REF="${STORAGE}:${DISK_REF:-}${DISK1}"
+DISK0="vm-${VMID}-disk-0${DISK_EXT}"
+DISK1="vm-${VMID}-disk-1${DISK_EXT}"
+DISK0_REF="${STORAGE}:${DISK_REF}${DISK0}"
+DISK1_REF="${STORAGE}:${DISK_REF}${DISK1}"
 log_info "DISK0_REF=$DISK0_REF  DISK1_REF=$DISK1_REF"
 
-# --- CREAR VM ---
-log_step "[11] qm create (SIN -agent)"
-msg_info "Creando VM"
+# =============================================================================
+# FASE 1: Crear VM con SOLO la interfaz WAN (net0 en vmbr1)
+# Motivo: la imagen de FreeBSD trae ifconfig_DEFAULT="DHCP" y dhclient se
+# cuelga infinitamente si una interfaz no recibe respuesta. Con una sola
+# interfaz (la WAN, que SÍ tiene DHCP en vmbr1) el arranque no se bloquea.
+# =============================================================================
+log_step "[11] qm create (solo WAN)"
+msg_info "Creando VM con interfaz WAN únicamente"
 if [ -n "$WAN_BRG" ]; then
-  NET0_BRG="$WAN_BRG"; NET0_MAC="$WAN_MAC"
-  NET1_BRG="$BRG";     NET1_MAC="$MAC"
+  WAN_MAC_FINAL="$WAN_MAC"
 else
-  NET0_BRG="$BRG"; NET0_MAC="$MAC"; NET1_BRG=""; NET1_MAC=""
+  # Modo single: usar LAN bridge como única interfaz, con MAC de LAN
+  WAN_BRG="$BRG"
+  WAN_MAC_FINAL="$MAC"
 fi
 qm create $VMID ${MACHINE} -tablet 0 -localtime 1 -bios ovmf${CPU_TYPE} \
   -cores $CORE_COUNT -memory $RAM_SIZE -name $HN -tags community-script \
-  -net0 virtio,bridge=$NET0_BRG,macaddr=$NET0_MAC$VLAN$MTU \
+  -net0 virtio,bridge=$WAN_BRG,macaddr=$WAN_MAC_FINAL$VLAN$MTU \
   -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
-# Sin -agent 1 a propósito
+# Sin -agent 1 (evita reinicios por falta de QEMU guest agent)
 
 log_step "[12] pvesm alloc"
 aa=1; am=4; ad=5
@@ -456,26 +378,20 @@ msg_ok "Discos OK"
 DESC="<div align='center'><h2>OPNsense VM (FreeBSD ${FREEBSD_MAJOR}.x)</h2><p>OPNsense ${OPNSENSE_VERSION}</p></div>"
 qm set $VMID -description "$DESC" >/dev/null
 
-if [ -n "$NET1_BRG" ]; then
-  log_step "[15] WAN"
-  qm set $VMID -net1 virtio,bridge=${NET1_BRG},macaddr=${NET1_MAC} &>/dev/null
-  msg_ok "WAN añadida en $NET1_BRG"
-fi
-
-log_info "VM config:"; qm config $VMID 2>&1 | tee -a "$LOG_FILE"
+log_info "VM config inicial:"; qm config $VMID 2>&1 | tee -a "$LOG_FILE"
 
 # --- ARRANQUE ---
-log_step "[16] Iniciando VM"
+log_step "[15] Iniciando VM"
 msg_ok "Arrancando VM"
 qm start $VMID
 sleep 5
 
-log_step "[17] Serial reader"
+log_step "[16] Serial reader"
 serial_reader_start || { msg_error "Serial reader falló"; exit 1; }
 sleep 3
 dump_serial_tail 20
 
-log_step "[18] Esperando login (ahora sin cuelgue)"
+log_step "[17] Esperando login"
 msg_info "Esperando prompt 'login:'"
 if ! wait_for_serial_pattern "login:" 600 "FreeBSD login"; then
   dump_serial_tail 80
@@ -484,33 +400,32 @@ if ! wait_for_serial_pattern "login:" 600 "FreeBSD login"; then
 fi
 msg_ok "Login detectado"
 
-log_step "[19] Login root"
+log_step "[18] Login root"
 send_line_to_vm "root"; sleep 3
 send_line_to_vm "";     sleep 3
 
-log_step "[20] Esperando shell root"
+log_step "[19] Esperando shell root"
 if ! wait_for_serial_pattern "root@[^:]*:[^#]*#" 180 "root shell"; then
   dump_serial_tail 40; msg_error "Sin shell root"; exit 1
 fi
 msg_ok "Shell root lista"
 
 # --- BOOTSTRAP ---
-log_step "[21] Descargando bootstrap"
+log_step "[20] Descargando bootstrap"
 msg_info "fetch bootstrap"
 send_line_to_vm "fetch https://raw.githubusercontent.com/opnsense/update/master/src/bootstrap/opnsense-bootstrap.sh.in"
 sleep 10
 dump_serial_tail 15
 
-log_step "[22] Ejecutando bootstrap"
-msg_ok "Ejecutando bootstrap (15-20 min)"
+log_step "[21] Ejecutando bootstrap"
+msg_ok "Ejecutando bootstrap (15-25 min)"
 send_line_to_vm "sh ./opnsense-bootstrap.sh.in -y -f -r ${var_version}"
 
-log_step "[23] Esperando fin del bootstrap"
+log_step "[22] Esperando fin del bootstrap"
 el=0
 while [ $el -lt 2400 ]; do
   sleep 30; el=$((el+30))
-  # El bootstrap reinicia al terminar; esperamos ver el prompt de OPNsense
-  if tail -n 60 "$SERIAL_LOG" | grep -qE "OPNsense.*login:|login: ?$" ; then
+  if tail -n 80 "$SERIAL_LOG" | grep -qE "OPNsense.*login:|login: ?$"; then
     log_info "Reboot detectado tras bootstrap ($((el/60)) min)"; break
   fi
   (( el % 120 == 0 )) && { log_info "Bootstrap: $((el/60)) min"; dump_serial_tail 8; }
@@ -518,66 +433,84 @@ done
 msg_ok "Bootstrap terminado (~$((el/60)) min)"
 sleep 60
 
-log_step "[24] Login OPNsense"
-send_line_to_vm "root";     sleep 3
-send_line_to_vm "opnsense"; sleep 8
+# =============================================================================
+# FASE 2: apagar, añadir la LAN (net1 en vmbr0), arrancar de nuevo
+# =============================================================================
+log_step "[23] Añadiendo interfaz LAN"
+msg_info "Apagando VM para añadir la LAN"
+qm shutdown $VMID --timeout 90 2>/dev/null || qm stop $VMID
+sleep 10
+# En OPNsense, la primera interfaz (vtnet0) será la WAN.
+# Añadimos vtnet1 como LAN en vmbr0.
+qm set $VMID -net1 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU &>/dev/null
+msg_ok "LAN añadida en $BRG"
 
-log_step "[25] Configurando interfaces"
+log_info "VM config final:"; qm config $VMID 2>&1 | tee -a "$LOG_FILE"
+
+log_step "[24] Rearrancando VM"
+qm start $VMID
+sleep 10
+serial_reader_stop
+serial_reader_start || { msg_error "Serial reader falló"; exit 1; }
+sleep 3
+
+log_step "[25] Esperando login de OPNsense"
+if ! wait_for_serial_pattern "login:" 600 "OPNsense login"; then
+  dump_serial_tail 60
+fi
+msg_ok "Login OPNsense detectado"
+
+log_step "[26] Login OPNsense"
+send_line_to_vm "root";     sleep 4
+send_line_to_vm "opnsense"; sleep 10
+dump_serial_tail 20
+
+log_step "[27] Configurando interfaces"
 msg_info "Menú 1: asignar interfaces"
-send_line_to_vm "1"; sleep 4
-send_line_to_vm "n"; sleep 3
-send_line_to_vm "n"; sleep 3
+send_line_to_vm "1"; sleep 5     # Assign interfaces
+send_line_to_vm "n"; sleep 3     # No LAGGs
+send_line_to_vm "n"; sleep 3     # No VLANs
 if [ -n "$WAN_BRG" ]; then
-  send_line_to_vm "vtnet0"; sleep 3
-  send_line_to_vm "vtnet1"; sleep 3
+  # vtnet0 = WAN (ya arrancado con dhclient), vtnet1 = LAN (recién añadido)
+  send_line_to_vm "vtnet0"; sleep 4    # WAN
+  send_line_to_vm "vtnet1"; sleep 4    # LAN
 else
-  send_line_to_vm "";       sleep 3
-  send_line_to_vm "vtnet0"; sleep 3
+  send_line_to_vm "";       sleep 4
+  send_line_to_vm "vtnet0"; sleep 4
 fi
 send_line_to_vm ""; sleep 3
-send_line_to_vm "y"; sleep 8
+send_line_to_vm "y"; sleep 10
+dump_serial_tail 30
 
-log_step "[26] LAN IP (192.168.2.1)"
+log_step "[28] Configurando LAN IP"
 if [ -n "$IP_ADDR" ] && [ -n "$NETMASK" ]; then
-  msg_info "Configurando LAN: $IP_ADDR/$NETMASK"
-  send_line_to_vm "2"; sleep 4
-  send_line_to_vm "2"; sleep 3
-  send_line_to_vm "$IP_ADDR"; sleep 3
-  send_line_to_vm "$NETMASK"; sleep 3
-  send_line_to_vm ""; sleep 3
-  send_line_to_vm ""; sleep 3
-  send_line_to_vm "y"; sleep 3
+  msg_info "LAN: $IP_ADDR/$NETMASK"
+  send_line_to_vm "2"; sleep 5     # Set interface IP
+  send_line_to_vm "2"; sleep 4     # LAN (opción 2)
+  send_line_to_vm "$IP_ADDR"; sleep 4
+  send_line_to_vm "$NETMASK"; sleep 4
+  send_line_to_vm ""; sleep 4      # Gateway vacío
+  send_line_to_vm ""; sleep 4      # IPv6 vacío
+  send_line_to_vm "y"; sleep 4     # DHCP server sí
   DS=$(echo "$IP_ADDR" | awk -F. '{print $1"."$2"."$3".100"}')
   DE=$(echo "$IP_ADDR" | awk -F. '{print $1"."$2"."$3".199"}')
-  send_line_to_vm "$DS"; sleep 3
-  send_line_to_vm "$DE"; sleep 3
-  send_line_to_vm "n"; sleep 3
-  send_line_to_vm ""; sleep 5
-  msg_ok "LAN configurada"
+  send_line_to_vm "$DS"; sleep 4
+  send_line_to_vm "$DE"; sleep 4
+  send_line_to_vm "n"; sleep 3     # No revertir HTTP
+  send_line_to_vm ""; sleep 6
+  msg_ok "LAN configurada: $IP_ADDR/$NETMASK"
 fi
 
-log_step "[27] WAN IP"
-if [ -n "$WAN_BRG" ] && [ -n "$WAN_IP_ADDR" ] && [ -n "$WAN_NETMASK" ]; then
-  send_line_to_vm "2"; sleep 4
-  send_line_to_vm "1"; sleep 3
-  send_line_to_vm "$WAN_IP_ADDR"; sleep 3
-  send_line_to_vm "$WAN_NETMASK"; sleep 3
-  send_line_to_vm "$WAN_GW"; sleep 3
-  send_line_to_vm ""; sleep 3
-  send_line_to_vm ""; sleep 5
-  msg_ok "WAN configurada"
-fi
+log_step "[29] Volviendo al menú"
+send_line_to_vm "0"; sleep 4
 
-log_step "[28] Volviendo al menú"
-send_line_to_vm "0"; sleep 3
-
-log_step "[29] Finalizado"
+log_step "[30] Finalizado"
 serial_reader_stop || true
-qemu_nbd_disconnect || true
 msg_ok "OPNsense VM lista"
 echo
 msg_ok "WebUI: https://${IP_ADDR}"
 echo -e "${YW}Credenciales:${CL} root / opnsense"
-[ -n "$WAN_BRG" ] && echo -e "${YW}WAN:${CL} bridge ${WAN_BRG}"
+[ -n "$WAN_BRG" ] && echo -e "${YW}WAN:${CL} bridge ${WAN_BRG} (DHCP)"
+echo -e "${YW}LAN:${CL} bridge ${BRG} (${IP_ADDR}/${NETMASK})"
 echo -e "${YW}Log:${CL} $LOG_FILE"
 log_info "Script finalizado"
