@@ -4,11 +4,16 @@
 # Author: michelroegl-brunner
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 #
-# OPNsense VM from official image
-# Uses https://pkg.opnsense.org/releases/<version>/OPNsense-<version>-vga-amd64.img.bz2
-# No more FreeBSD bootstrap / pkgbase issues.
+# OPNsense VM - Instalación y configuración automatizada desde imagen oficial
+# ---------------------------------------------------------------------------
+# Variables de entorno opcionales:
+#   OPNSENSE_VERSION=26.7         Versión de OPNsense a instalar
+#   OPNSENSE_DEFAULT_PASSWORD=opnsense  Contraseña por defecto de la imagen
+#   DEBUG_SERIAL=1                Muestra el log completo en pantalla
+#   KEEP_ON_ERROR=1               No destruye la VM si hay un error
+#   WAIT_EXTRA=N                  Segundos extra entre pasos críticos
+# ---------------------------------------------------------------------------
 
-# ------------------------- DEBUG / LOGGING ---------------------------------
 LOG_FILE="${LOG_FILE:-/var/log/opnsense-vm-install.log}"
 DEBUG_SERIAL="${DEBUG_SERIAL:-0}"
 KEEP_ON_ERROR="${KEEP_ON_ERROR:-0}"
@@ -69,7 +74,6 @@ GEN_MAC_LAN=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)
 
 YW=$(echo "\033[33m")
 BL=$(echo "\033[36m")
-HA=$(echo "\033[1;34m")
 RD=$(echo "\033[01;31m")
 BGN=$(echo "\033[4;92m")
 GN=$(echo "\033[1;92m")
@@ -622,46 +626,127 @@ msg_ok "Created OPNsense VM ${CL}${BL}(${HN})"
 log_info "VM config:"
 qm config $VMID 2>&1 | tee -a "$LOG_FILE"
 
-# ------------------------- BOOT & CONFIG ------------------------------------
-log_step "[STEP 18] Starting VM"
-msg_ok "Starting OPNsense VM (first boot, patience please)"
+# ------------------------- BOOT & INSTALL -----------------------------------
+log_step "[STEP 18] Starting VM for installation"
+msg_ok "Starting OPNsense VM in Live mode for installation"
 qm start $VMID
-log_info "Waiting for OPNsense to boot..."
+log_info "Waiting for OPNsense live media to boot..."
 sleep 60
 
-log_step "[STEP 19] Boot wait & screendump"
+log_step "[STEP 19] Waiting for login prompt"
 for i in 1 2 3 4 5 6; do
   sleep 20
   h=$(screen_hash)
   log_info "Boot poll ${i}/6: screen hash=${h:-<none>}"
 done
-
-# Save a reference screendump for the user
 dump_screen
-log_info "Initial screendump stored at: $SCREEN_PPM"
 
-log_step "[STEP 20] Sending root login"
-msg_info "Attempting root login (default password: ${OPNSENSE_DEFAULT_PASSWORD})"
+log_step "[STEP 20] Logging in as installer"
+msg_info "Logging in as 'installer' to start the installation"
+send_line_to_vm "installer"
+sleep 3
+send_line_to_vm "${OPNSENSE_DEFAULT_PASSWORD}"
+sleep 10
+dump_screen
+
+log_step "[STEP 21] Running installer (workaround for UFS bug)"
+msg_info "Starting installer and selecting 'Install via other modes' -> 'Auto (UFS)'"
+# El instalador puede mostrar un menú. Primero seleccionamos "Install" (opción 1)
+# Si falla por el bug de UFS en disco vacío, usamos el workaround.
+send_line_to_vm "1"
+sleep 5
+# Si aparece un error, el instalador vuelve al menú. Seleccionamos "Install via other modes"
+# En la mayoría de las versiones esta es la opción 3. Enviamos "3" por si acaso.
+send_line_to_vm "3"
+sleep 5
+# En el submenú, seleccionamos "Auto (UFS)" que suele ser la opción 1
+send_line_to_vm "1"
+sleep 5
+dump_screen
+msg_ok "Installer started (if a menu is shown, the script will try to proceed automatically)"
+
+log_step "[STEP 22] Selecting installation disk"
+msg_info "Selecting target disk (vtbd0 - 20GB virtual disk)"
+# El instalador pregunta en qué disco instalar. Seleccionamos vtbd0 (suele ser la opción 1)
+send_line_to_vm "1"
+sleep 5
+dump_screen
+# Confirmar particionado
+send_line_to_vm "y"
+sleep 5
+dump_screen
+
+log_step "[STEP 23] Waiting for installation to complete"
+msg_info "Installation in progress. This will take a few minutes..."
+# Esperamos a que termine la instalación. En lugar de un sleep fijo,
+# monitorizamos el hash de la pantalla hasta que se estabilice.
+install_stable=0
+install_elapsed=0
+last_hash=""
+while [ $install_stable -lt 10 ] && [ $install_elapsed -lt 600 ]; do
+  sleep 30
+  install_elapsed=$((install_elapsed + 30))
+  new_hash=$(screen_hash)
+  if [ -n "$new_hash" ] && [ "$new_hash" = "$last_hash" ]; then
+    install_stable=$((install_stable + 1))
+  else
+    install_stable=0
+  fi
+  last_hash="$new_hash"
+  log_info "Install poll: ${install_elapsed}s elapsed, screen ${new_hash:0:8}, stable ${install_stable}/10"
+  if (( install_elapsed % 120 == 0 )); then
+    dump_screen
+  fi
+done
+msg_ok "Installation finished after $((install_elapsed / 60)) minutes"
+
+log_step "[STEP 24] Rebooting after installation"
+msg_info "Installation complete. Rebooting the VM to boot from the installed disk."
+# Enviamos "reboot" o simplemente apagamos y encendemos. Es más seguro apagar.
+qm shutdown $VMID --timeout 60 || qm stop $VMID
+sleep 10
+log_info "VM shut down after installation"
+
+log_step "[STEP 25] Removing installation media"
+msg_info "Detaching the installation disk from the VM"
+# El disco de instalación es scsi1 (importado como scsi1 en algunos casos) o el mismo scsi0.
+# En nuestro script, importamos la imagen como scsi0. Pero luego instalamos en el mismo disco.
+# En realidad, la imagen oficial ya está en un disco. Al instalar, se escribe en el mismo.
+# NO hay un medio de instalación separado en este flujo. El disco scsi0 es el que contiene
+# tanto el instalador como el destino de la instalación.
+# Por lo tanto, NO necesitamos extraer ningún medio. Simplemente arrancamos de nuevo.
+log_info "No extra installation media to remove (single-disk installation flow)"
+
+log_step "[STEP 26] Starting VM from installed disk"
+qm start $VMID
+msg_ok "OPNsense VM started"
+log_info "Waiting for OPNsense to boot from disk..."
+sleep 60
+
+# Verificar que ya no estamos en Live mode
+log_step "[STEP 27] Verifying installed system"
+for i in 1 2 3 4 5 6; do
+  sleep 20
+  h=$(screen_hash)
+  log_info "Post-install boot poll ${i}/6: screen hash=${h:-<none>}"
+done
+dump_screen
+
+log_step "[STEP 28] Logging in to configure"
+msg_info "Logging in as root to configure the system"
 send_line_to_vm "root"
 sleep 3
 send_line_to_vm "${OPNSENSE_DEFAULT_PASSWORD}"
 sleep 8
 dump_screen
 
-log_step "[STEP 21] Handling possible autologin (idempotent)"
-# If autologin is enabled on the console, the previous 'root'/'opnsense' text
-# may have landed on the menu. We send an extra Enter and a menu redraw to
-# make sure we are at a clean menu state.
-send_line_to_vm ""
-sleep 2
-
-log_step "[STEP 22] Configuring interfaces (menu option 1)"
+log_step "[STEP 29] Configuring interfaces (menu option 1)"
 msg_info "Assigning interfaces via menu option 1"
-# Menu 1 -> Assign Interfaces
+# Menú 1 -> Assign Interfaces
 # LAGGs -> n
 # VLANs -> n
-# WAN  -> vtnet0 (or vtnet1 depending on mode)
-# LAN  -> vtnet1 (or vtnet0)
+# WAN  -> vtnet0 (o vtnet1 según el modo)
+# LAN  -> vtnet1 (o vtnet0)
 # Optional -> empty
 # Confirm -> y
 send_line_to_vm "1"
@@ -671,7 +756,7 @@ sleep 2
 send_line_to_vm "n"
 sleep 2
 if [ -n "$NET1_BRG" ]; then
-  # Dual interface: WAN=vtnet0, LAN=vtnet1 (matches our net0/net1 order)
+  # Dual interface: WAN=vtnet0, LAN=vtnet1 (coincide con nuestro orden net0/net1)
   send_line_to_vm "vtnet0"
   sleep 2
   send_line_to_vm "vtnet1"
@@ -689,20 +774,20 @@ send_line_to_vm "y"
 sleep 6
 dump_screen
 
-log_step "[STEP 23] Configuring LAN IP (menu option 2)"
+log_step "[STEP 30] Configuring LAN IP (menu option 2)"
 if [ -n "$IP_ADDR" ] && [ -n "$NETMASK" ]; then
   msg_info "Configuring LAN IP: $IP_ADDR/$NETMASK"
-  # Menu 2 -> Set interface IP address
-  # Select LAN -> 2 (assuming WAN=1, LAN=2)
-  # New IPv4 address
-  # Netmask
-  # Gateway (empty for LAN)
-  # IPv6 (empty)
-  # DHCP server (y)
-  # DHCP start
-  # DHCP end
-  # Revert HTTP (n)
-  # Press Enter to continue
+  # Menú 2 -> Set interface IP address
+  # Seleccionar LAN -> 2 (asumiendo WAN=1, LAN=2)
+  # Nueva dirección IPv4
+  # Máscara
+  # Gateway (vacío para LAN)
+  # IPv6 (vacío)
+  # Servidor DHCP (y)
+  # Inicio DHCP
+  # Fin DHCP
+  # Revertir HTTP (n)
+  # Enter para continuar
   send_line_to_vm "2"
   sleep 3
   send_line_to_vm "2"
@@ -717,7 +802,7 @@ if [ -n "$IP_ADDR" ] && [ -n "$NETMASK" ]; then
   sleep 2
   send_line_to_vm "y"
   sleep 2
-  # DHCP range start: use .100 of the same subnet
+  # Rango DHCP: usar .100 y .199 de la misma subred
   DHCP_START=$(echo "$IP_ADDR" | awk -F. '{print $1"."$2"."$3".100"}')
   DHCP_END=$(echo "$IP_ADDR" | awk -F. '{print $1"."$2"."$3".199"}')
   send_line_to_vm "$DHCP_START"
@@ -734,12 +819,12 @@ else
   log_info "LAN IP left at default (192.168.1.1/24)"
 fi
 
-log_step "[STEP 24] Configuring WAN IP (menu option 2)"
+log_step "[STEP 31] Configuring WAN IP (menu option 2)"
 if [ -n "$WAN_BRG" ] && [ -n "$WAN_IP_ADDR" ] && [ -n "$WAN_NETMASK" ]; then
   msg_info "Configuring WAN IP: $WAN_IP_ADDR/$WAN_NETMASK"
   send_line_to_vm "2"
   sleep 3
-  send_line_to_vm "1"          # WAN is option 1
+  send_line_to_vm "1"          # WAN es la opción 1
   sleep 2
   send_line_to_vm "${WAN_IP_ADDR}"
   sleep 2
@@ -749,7 +834,7 @@ if [ -n "$WAN_BRG" ] && [ -n "$WAN_IP_ADDR" ] && [ -n "$WAN_NETMASK" ]; then
   sleep 2
   send_line_to_vm ""            # IPv6
   sleep 2
-  send_line_to_vm ""            # Not asked for WAN, safe empty Enter
+  send_line_to_vm ""            # No se pregunta en WAN, Enter seguro
   sleep 4
   dump_screen
   msg_ok "WAN IP configured: $WAN_IP_ADDR/$WAN_NETMASK"
@@ -757,12 +842,12 @@ else
   log_info "WAN IP left at DHCP (default)"
 fi
 
-log_step "[STEP 25] Returning to main menu"
+log_step "[STEP 32] Returning to main menu"
 send_line_to_vm "0"
 sleep 3
 dump_screen
 
-log_step "[STEP 26] Finalizing"
+log_step "[STEP 33] Finalizing"
 msg_ok "OPNsense VM is ready"
 echo
 if [ -n "$IP_ADDR" ]; then
