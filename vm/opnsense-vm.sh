@@ -4,11 +4,11 @@
 # Author: michelroegl-brunner
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 #
-# OPNsense VM - Instalación y configuración automatizada desde imagen oficial
+# OPNsense VM - Instalación automatizada desde imagen oficial
 # ---------------------------------------------------------------------------
 # Variables de entorno opcionales:
 #   OPNSENSE_VERSION=26.7         Versión de OPNsense a instalar
-#   OPNSENSE_DEFAULT_PASSWORD=opnsense  Contraseña por defecto de la imagen
+#   OPNSENSE_DEFAULT_PASSWORD=opnsense  Contraseña por defecto
 #   DEBUG_SERIAL=1                Muestra el log completo en pantalla
 #   KEEP_ON_ERROR=1               No destruye la VM si hay un error
 #   WAIT_EXTRA=N                  Segundos extra entre pasos críticos
@@ -34,7 +34,6 @@ log() {
 log_info()  { log "INFO " "$@"; }
 log_warn()  { log "WARN " "$@"; }
 log_err()   { log "ERROR" "$@"; }
-log_dbg()   { log "DEBUG" "$@"; }
 log_step()  { log "STEP " "$@"; }
 log_ok()    { log "OK   " "$@"; }
 
@@ -565,8 +564,8 @@ else
   NET1_BRG="";         NET1_MAC=""
 fi
 
-log_info "qm create $VMID -agent 1${MACHINE} -tablet 0 -localtime 1 -bios ovmf${CPU_TYPE} -cores $CORE_COUNT -memory $RAM_SIZE -name $HN -tags community-script -net0 virtio,bridge=$NET0_BRG,macaddr=$NET0_MAC -onboot 1 -ostype l26 -scsihw virtio-scsi-pci"
-qm create $VMID -agent 1${MACHINE} -tablet 0 -localtime 1 -bios ovmf${CPU_TYPE} -cores $CORE_COUNT -memory $RAM_SIZE \
+log_info "qm create $VMID ${MACHINE} -tablet 0 -localtime 1 -bios ovmf${CPU_TYPE} -cores $CORE_COUNT -memory $RAM_SIZE -name $HN -tags community-script -net0 virtio,bridge=$NET0_BRG,macaddr=$NET0_MAC -onboot 1 -ostype l26 -scsihw virtio-scsi-pci"
+qm create $VMID ${MACHINE} -tablet 0 -localtime 1 -bios ovmf${CPU_TYPE} -cores $CORE_COUNT -memory $RAM_SIZE \
   -name $HN -tags community-script -net0 virtio,bridge=$NET0_BRG,macaddr=$NET0_MAC$VLAN$MTU \
   -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
 
