@@ -4,16 +4,14 @@
 # Author: michelroegl-brunner
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 #
-# OPNsense VM - FreeBSD 14.x + bootstrap
-# - Escribe en la CONSOLA SERIE (ttyu0), no en la VGA
-# - Instala primero con una sola NIC (WAN) para evitar el cuelgue de dhclient
-# - Añade la LAN tras el bootstrap
+# OPNsense VM - Instalación desde imagen oficial VGA
+# Sin bootstrap, sin dependencia de red durante la instalación.
+# Instala OPNsense en el disco con opnsense-installer y configura la red.
 
 LOG_FILE="${LOG_FILE:-/var/log/opnsense-vm-install.log}"
 DEBUG_SERIAL="${DEBUG_SERIAL:-0}"
 KEEP_ON_ERROR="${KEEP_ON_ERROR:-0}"
 OPNSENSE_VERSION="${OPNSENSE_VERSION:-26.7}"
-FREEBSD_MAJOR="14"
 LAN_STATIC_IP="${LAN_STATIC_IP:-192.168.2.1}"
 LAN_STATIC_PREFIX="${LAN_STATIC_PREFIX:-24}"
 
@@ -30,8 +28,8 @@ log_ok()   { log "OK   " "$@"; }
 exec > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2)
 
 log_info "==============================================================="
-log_info "OPNsense VM install (FreeBSD ${FREEBSD_MAJOR}.x + bootstrap)"
-log_info "OPNsense target: $OPNSENSE_VERSION"
+log_info "OPNsense VM install (imagen oficial VGA)"
+log_info "Versión: $OPNSENSE_VERSION"
 log_info "LAN estática: $LAN_STATIC_IP/$LAN_STATIC_PREFIX"
 log_info "DEBUG_SERIAL=$DEBUG_SERIAL  KEEP_ON_ERROR=$KEEP_ON_ERROR"
 log_info "==============================================================="
@@ -120,40 +118,26 @@ log_info "TEMP_DIR=$TEMP_DIR"
 pushd "$TEMP_DIR" >/dev/null
 
 # =============================================================================
-# CONSOLA SERIE (escritura directa al socket, NO qm sendkey)
+# CONSOLA SERIE (PTY bidireccional)
 # =============================================================================
-SERIAL_PTY=""
-SERIAL_LOG=""
-SOCAT_PID=""
-READER_PID=""
+SERIAL_PTY=""; SERIAL_LOG=""; SOCAT_PID=""; READER_PID=""
 
 function serial_start() {
   serial_stop
-  SERIAL_LOG="${TEMP_DIR}/serial-${VMID}.log"
-  : > "$SERIAL_LOG"
-  SERIAL_PTY="${TEMP_DIR}/serial-${VMID}.pty"
-  rm -f "$SERIAL_PTY"
-
+  SERIAL_LOG="${TEMP_DIR}/serial-${VMID}.log"; : > "$SERIAL_LOG"
+  SERIAL_PTY="${TEMP_DIR}/serial-${VMID}.pty"; rm -f "$SERIAL_PTY"
   command -v socat >/dev/null 2>&1 || { log_err "socat no instalado (apt install socat)"; return 1; }
-
   local sock="/var/run/qemu-server/${VMID}.serial0"
   for _ in $(seq 1 30); do [ -S "$sock" ] && break; sleep 1; done
   [ -S "$sock" ] || { log_err "Socket serie $sock no aparece"; return 1; }
-
-  # socat: socket QEMU <-> PTY en $SERIAL_PTY, espera a que abramos el slave
   socat UNIX-CONNECT:"$sock" PTY,link="$SERIAL_PTY",raw,echo=0,waitslave &
   SOCAT_PID=$!
   for _ in $(seq 1 50); do [ -L "$SERIAL_PTY" ] && break; sleep 0.2; done
   [ -L "$SERIAL_PTY" ] || { log_err "PTY $SERIAL_PTY no aparece"; return 1; }
   kill -0 "$SOCAT_PID" 2>/dev/null || { log_err "socat murió"; return 1; }
-
-  # FD 3 = consola serie bidireccional
   exec 3<>"$SERIAL_PTY"
-
-  # Lector en background: todo lo que llega del guest al log
   stdbuf -o0 cat <&3 >> "$SERIAL_LOG" &
   READER_PID=$!
-
   sleep 1
   log_info "Serial PTY activo: $SERIAL_PTY (socat=$SOCAT_PID reader=$READER_PID)"
   return 0
@@ -161,8 +145,8 @@ function serial_start() {
 
 function serial_stop() {
   exec 3>&- 2>/dev/null || true
-  if [ -n "${READER_PID:-}" ]; then kill "$READER_PID" 2>/dev/null || true; wait "$READER_PID" 2>/dev/null || true; fi
-  if [ -n "${SOCAT_PID:-}" ];  then kill "$SOCAT_PID" 2>/dev/null || true;  wait "$SOCAT_PID" 2>/dev/null || true; fi
+  [ -n "${READER_PID:-}" ] && { kill "$READER_PID" 2>/dev/null || true; wait "$READER_PID" 2>/dev/null || true; }
+  [ -n "${SOCAT_PID:-}" ]  && { kill "$SOCAT_PID" 2>/dev/null || true; wait "$SOCAT_PID" 2>/dev/null || true; }
   READER_PID=""; SOCAT_PID=""
 }
 
@@ -192,7 +176,7 @@ function dump_serial_tail() {
 
 # --- PROMPT ---
 if ! whiptail --backtitle "Proxmox VE Helper Scripts" --title "OPNsense VM" \
-     --yesno "Crear VM OPNsense (FreeBSD ${FREEBSD_MAJOR}.x + bootstrap)?" 10 58; then
+     --yesno "Crear VM OPNsense (imagen oficial VGA)?" 10 58; then
   header_info && echo -e "⚠ Cancelado\n" && exit
 fi
 
@@ -292,29 +276,25 @@ fi
 msg_ok "Storage: $STORAGE"
 msg_ok "VM ID: $VMID"
 
-# --- URL FreeBSD ---
-log_step "[06] Resolviendo FreeBSD ${FREEBSD_MAJOR}.x"
-RELEASE_LIST="$(curl -s https://download.freebsd.org/releases/VM-IMAGES/ | grep -Eo "${FREEBSD_MAJOR}\.[0-9]+-RELEASE" | sort -Vr | uniq)"
-log_info "Releases: $(echo $RELEASE_LIST | tr '\n' ' ')"
-URL=""; FREEBSD_VER=""
-for ver in $RELEASE_LIST; do
-  for variant in "" "-ufs" "-zfs"; do
-    c="https://download.freebsd.org/releases/VM-IMAGES/${ver}/amd64/Latest/FreeBSD-${ver}-amd64${variant}.qcow2.xz"
-    if curl -fsI "$c" >/dev/null 2>&1; then FREEBSD_VER="$ver"; URL="$c"; break 2; fi
-  done
-done
-[ -z "$URL" ] && { msg_error "No hay imagen FreeBSD ${FREEBSD_MAJOR}.x"; exit 115; }
-msg_ok "URL: $URL"
+# --- URL imagen OPNsense ---
+log_step "[06] Resolviendo imagen oficial OPNsense ${OPNSENSE_VERSION}"
+OPNSENSE_URL="https://pkg.opnsense.org/releases/${OPNSENSE_VERSION}/OPNsense-${OPNSENSE_VERSION}-vga-amd64.img.bz2"
+log_info "URL: $OPNSENSE_URL"
+if ! curl -fsIL "$OPNSENSE_URL" >/dev/null 2>&1; then
+  msg_error "Imagen OPNsense no encontrada en $OPNSENSE_URL"
+  exit 115
+fi
+msg_ok "Imagen disponible"
 
 log_step "[07] Espacio"; check_disk_space "$TEMP_DIR" 20 || { msg_error "Espacio insuficiente"; exit 214; }
-log_step "[08] Descargando"; msg_info "Descargando $(basename $URL)"
-curl -f#SL -o "$(basename "$URL")" "$URL"; echo -en "\e[1A\e[0K"; msg_ok "Descargado"
+log_step "[08] Descargando"; msg_info "Descargando $(basename $OPNSENSE_URL)"
+curl -f#SL -o "$(basename "$OPNSENSE_URL")" "$OPNSENSE_URL"; echo -en "\e[1A\e[0K"; msg_ok "Descargado"
 
 log_step "[09] Descomprimiendo"
 check_disk_space "$TEMP_DIR" 15 || { msg_error "Espacio insuficiente"; exit 214; }
-FILE=FreeBSD.qcow2
-unxz -cv "$(basename "$URL")" > "$FILE" || { msg_error "Fallo al descomprimir"; exit 115; }
-rm -f "$(basename "$URL")"; msg_ok "Descomprimido: $FILE"
+FILE="OPNsense.img"
+bunzip2 -c "$(basename "$OPNSENSE_URL")" > "$FILE" || { msg_error "Fallo al descomprimir"; exit 115; }
+rm -f "$(basename "$OPNSENSE_URL")"; msg_ok "Descomprimido: $FILE"
 
 # --- MAPEO ---
 log_step "[10] Mapeando storage"
@@ -330,16 +310,19 @@ DISK0_REF="${STORAGE}:${DISK_REF}${DISK0}"
 DISK1_REF="${STORAGE}:${DISK_REF}${DISK1}"
 log_info "DISK0_REF=$DISK0_REF  DISK1_REF=$DISK1_REF"
 
-# --- CREAR VM (solo WAN) ---
-log_step "[11] qm create (solo WAN)"
-msg_info "Creando VM con interfaz WAN únicamente"
-if [ -n "$WAN_BRG" ]; then WAN_MAC_FINAL="$WAN_MAC"
-else WAN_BRG="$BRG"; WAN_MAC_FINAL="$MAC"; fi
+# --- CREAR VM (dos NICs desde el principio) ---
+log_step "[11] qm create"
+msg_info "Creando VM"
+if [ -n "$WAN_BRG" ]; then
+  NET0_BRG="$WAN_BRG"; NET0_MAC="$WAN_MAC"
+  NET1_BRG="$BRG";     NET1_MAC="$MAC"
+else
+  NET0_BRG="$BRG"; NET0_MAC="$MAC"; NET1_BRG=""; NET1_MAC=""
+fi
 qm create $VMID ${MACHINE} -tablet 0 -localtime 1 -bios ovmf${CPU_TYPE} \
   -cores $CORE_COUNT -memory $RAM_SIZE -name $HN -tags community-script \
-  -net0 virtio,bridge=$WAN_BRG,macaddr=$WAN_MAC_FINAL$VLAN$MTU \
+  -net0 virtio,bridge=$NET0_BRG,macaddr=$NET0_MAC$VLAN$MTU \
   -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
-# Sin -agent 1 para evitar reinicios por falta de qemu guest agent
 
 log_step "[12] pvesm alloc"
 aa=1; am=4; ad=5
@@ -363,87 +346,32 @@ qm set $VMID -efidisk0 ${DISK0_REF}${FORMAT} -scsi0 ${DISK1_REF},${DISK_CACHE}${
 qm resize $VMID scsi0 20G >/dev/null
 msg_ok "Discos OK"
 
-DESC="<div align='center'><h2>OPNsense VM (FreeBSD ${FREEBSD_MAJOR}.x)</h2><p>OPNsense ${OPNSENSE_VERSION}</p></div>"
+DESC="<div align='center'><h2>OPNsense VM (imagen oficial ${OPNSENSE_VERSION})</h2></div>"
 qm set $VMID -description "$DESC" >/dev/null
+
+if [ -n "$NET1_BRG" ]; then
+  log_step "[15] Añadiendo WAN"
+  qm set $VMID -net1 virtio,bridge=${NET1_BRG},macaddr=${NET1_MAC} &>/dev/null
+  msg_ok "WAN añadida en $NET1_BRG"
+fi
 
 log_info "VM config inicial:"; qm config $VMID 2>&1 | tee -a "$LOG_FILE"
 
-# --- ARRANQUE ---
-log_step "[15] Iniciando VM"
+# --- ARRANQUE E INSTALACIÓN ---
+log_step "[16] Iniciando VM"
 qm start $VMID
 sleep 5
 
-log_step "[16] Serial reader (PTY bidireccional)"
+log_step "[17] Serial reader"
 serial_start || { msg_error "Serial no disponible"; exit 1; }
 sleep 3
 dump_serial_tail 20
 
-# --- LOGIN POR CONSOLA SERIE (NO qm sendkey) ---
-log_step "[17] Esperando login"
-wait_for_pattern "login: ?$" 600 "FreeBSD login" || { dump_serial_tail 80; msg_error "Sin login"; exit 1; }
+log_step "[18] Esperando login del live media"
+wait_for_pattern "login: ?$" 600 "Live login" || { dump_serial_tail 80; msg_error "Sin login"; exit 1; }
 msg_ok "Login detectado"
 
-log_step "[18] Enviando 'root' por consola serie"
-send_line "root"
-sleep 2
-
-log_step "[19] Esperando 'Password:'"
-wait_for_pattern "Password:" 120 "Password prompt" || { dump_serial_tail 30; }
-msg_ok "Password prompt recibido"
-
-log_step "[20] Enviando password vacío"
-send_line ""
-
-log_step "[21] Esperando shell root"
-wait_for_pattern "root@[^ ]*[:~]" 180 "root shell" || { dump_serial_tail 60; msg_error "Sin shell root"; exit 1; }
-msg_ok "Shell root lista en ttyu0"
-
-# --- BOOTSTRAP ---
-log_step "[22] Descargando bootstrap"
-msg_info "fetch bootstrap"
-send_line "fetch https://raw.githubusercontent.com/opnsense/update/master/src/bootstrap/opnsense-bootstrap.sh.in"
-sleep 12
-dump_serial_tail 15
-
-log_step "[23] Ejecutando bootstrap"
-msg_ok "Ejecutando bootstrap (~15-25 min)"
-send_line "sh ./opnsense-bootstrap.sh.in -y -f -r ${var_version}"
-
-log_step "[24] Esperando fin del bootstrap"
-el=0
-while [ $el -lt 2400 ]; do
-  sleep 30; el=$((el+30))
-  # Tras el bootstrap, la VM reinicia a OPNsense y muestra su login
-  if tail -n 100 "$SERIAL_LOG" | grep -qE "OPNsense.*login:|login: ?$"; then
-    log_info "Reboot de OPNsense detectado ($((el/60)) min)"; break
-  fi
-  (( el % 120 == 0 )) && { log_info "Bootstrap: $((el/60)) min"; dump_serial_tail 10; }
-done
-msg_ok "Bootstrap terminado (~$((el/60)) min)"
-sleep 60
-
-# --- AÑADIR LAN Y REARRANCAR ---
-log_step "[25] Añadiendo interfaz LAN"
-msg_info "Apagando VM para añadir la LAN"
-qm shutdown $VMID --timeout 90 2>/dev/null || qm stop $VMID
-sleep 10
-qm set $VMID -net1 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU &>/dev/null
-msg_ok "LAN añadida en $BRG"
-
-log_info "VM config final:"; qm config $VMID 2>&1 | tee -a "$LOG_FILE"
-
-log_step "[26] Rearrancando VM"
-qm start $VMID
-sleep 10
-serial_stop
-serial_start || { msg_error "Serial reader falló"; exit 1; }
-sleep 3
-
-log_step "[27] Esperando login de OPNsense"
-wait_for_pattern "login: ?$" 600 "OPNsense login" || { dump_serial_tail 80; }
-msg_ok "Login OPNsense detectado"
-
-log_step "[28] Login root en OPNsense"
+log_step "[19] Login como root en live media"
 send_line "root"
 sleep 2
 wait_for_pattern "Password:" 60 "Password" || true
@@ -451,14 +379,75 @@ send_line "opnsense"
 sleep 8
 dump_serial_tail 25
 
-log_step "[29] Asignando interfaces (menú 1)"
+log_step "[20] Verificando que estamos en live media"
+if ! wait_for_pattern "root@.*#" 30 "shell root"; then
+  msg_error "No se obtuvo shell root en live media"
+  exit 1
+fi
+msg_ok "Shell root en live media"
+
+log_step "[21] Lanzando opnsense-installer"
+msg_info "Ejecutando opnsense-installer (instalación automática)"
+send_line "opnsense-installer"
+sleep 5
+dump_serial_tail 30
+
+# El instalador es interactivo. Enviamos las respuestas conocidas:
+# 1. Seleccionar disco: vtbd0 (el disco de 20G)
+# 2. Particionado: Auto (UFS)
+# 3. Confirmar: y
+send_line "1"      # disco vtbd0
+sleep 5
+send_line "1"      # Auto (UFS)
+sleep 5
+send_line "y"      # confirmar
+sleep 10
+
+log_step "[22] Esperando fin de la instalación"
+el=0
+while [ $el -lt 900 ]; do
+  sleep 30; el=$((el+30))
+  if grep -qE "Installation complete|Reboot now|install.*complete" "$SERIAL_LOG" 2>/dev/null; then
+    log_info "Instalación completada ($((el/60)) min)"; break
+  fi
+  (( el % 120 == 0 )) && { log_info "Instalación: $((el/60)) min"; dump_serial_tail 10; }
+done
+msg_ok "Instalación finalizada (~$((el/60)) min)"
+sleep 20
+
+log_step "[23] Reiniciando tras instalación"
+# El instalador suele pedir reiniciar. Enviamos "reboot" o simplemente apagamos.
+qm shutdown $VMID --timeout 60 2>/dev/null || qm stop $VMID
+sleep 10
+msg_ok "VM apagada tras instalación"
+
+log_step "[24] Rearrancando desde disco instalado"
+qm start $VMID
+sleep 10
+serial_stop
+serial_start || { msg_error "Serial reader falló"; exit 1; }
+sleep 3
+
+log_step "[25] Esperando login de OPNsense instalado"
+wait_for_pattern "login: ?$" 600 "OPNsense login" || { dump_serial_tail 80; }
+msg_ok "Login OPNsense detectado"
+
+log_step "[26] Login root en OPNsense"
+send_line "root"
+sleep 2
+wait_for_pattern "Password:" 60 "Password" || true
+send_line "opnsense"
+sleep 8
+dump_serial_tail 25
+
+log_step "[27] Asignando interfaces (menú 1)"
 msg_info "Menú 1: asignar interfaces"
-send_line "1"; sleep 5     # Assign interfaces
-send_line "n"; sleep 3     # No LAGGs
-send_line "n"; sleep 3     # No VLANs
+send_line "1"; sleep 5
+send_line "n"; sleep 3
+send_line "n"; sleep 3
 if [ -n "$WAN_BRG" ]; then
-  send_line "vtnet0"; sleep 4    # WAN
-  send_line "vtnet1"; sleep 4    # LAN
+  send_line "vtnet0"; sleep 4
+  send_line "vtnet1"; sleep 4
 else
   send_line "";       sleep 4
   send_line "vtnet0"; sleep 4
@@ -467,16 +456,16 @@ send_line ""; sleep 3
 send_line "y"; sleep 12
 dump_serial_tail 40
 
-log_step "[30] LAN IP estática"
+log_step "[28] LAN IP estática"
 if [ -n "$IP_ADDR" ] && [ -n "$NETMASK" ]; then
   msg_info "LAN: $IP_ADDR/$NETMASK"
-  send_line "2"; sleep 5     # Set interface IP
-  send_line "2"; sleep 4     # LAN (opción 2)
+  send_line "2"; sleep 5
+  send_line "2"; sleep 4
   send_line "$IP_ADDR"; sleep 4
   send_line "$NETMASK"; sleep 4
-  send_line ""; sleep 4      # Gateway
-  send_line ""; sleep 4      # IPv6
-  send_line "y"; sleep 4     # DHCP server
+  send_line ""; sleep 4
+  send_line ""; sleep 4
+  send_line "y"; sleep 4
   DS=$(echo "$IP_ADDR" | awk -F. '{print $1"."$2"."$3".100"}')
   DE=$(echo "$IP_ADDR" | awk -F. '{print $1"."$2"."$3".199"}')
   send_line "$DS"; sleep 4
@@ -486,10 +475,10 @@ if [ -n "$IP_ADDR" ] && [ -n "$NETMASK" ]; then
   msg_ok "LAN configurada: $IP_ADDR/$NETMASK"
 fi
 
-log_step "[31] Volviendo al menú"
+log_step "[29] Volviendo al menú"
 send_line "0"; sleep 4
 
-log_step "[32] Finalizado"
+log_step "[30] Finalizado"
 serial_stop || true
 msg_ok "OPNsense VM lista"
 echo
