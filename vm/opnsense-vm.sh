@@ -5,11 +5,9 @@
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 #
 # OPNsense VM - FreeBSD 14.x + bootstrap
-# ---------------------------------------------------------------------------
-# Estrategia: durante la instalación solo se añade la interfaz WAN (vmbr1)
-# para evitar el cuelgue de dhclient en la LAN. La LAN (vmbr0) se añade
-# después del bootstrap y se configura con IP estática.
-# ---------------------------------------------------------------------------
+# - Escribe en la CONSOLA SERIE (ttyu0), no en la VGA
+# - Instala primero con una sola NIC (WAN) para evitar el cuelgue de dhclient
+# - Añade la LAN tras el bootstrap
 
 LOG_FILE="${LOG_FILE:-/var/log/opnsense-vm-install.log}"
 DEBUG_SERIAL="${DEBUG_SERIAL:-0}"
@@ -99,7 +97,7 @@ function cleanup_vmid() {
 function cleanup() {
   local ec=$?
   log_info "cleanup() exit=$ec"
-  serial_reader_stop 2>/dev/null || true
+  serial_stop 2>/dev/null || true
   popd >/dev/null 2>&1 || true
   [[ "${POST_TO_API_DONE:-}" == "true" && "${POST_UPDATE_DONE:-}" != "true" ]] && {
     [ "$ec" -eq 0 ] && post_update_to_api "done" "none" 2>/dev/null || true
@@ -121,32 +119,63 @@ fi
 log_info "TEMP_DIR=$TEMP_DIR"
 pushd "$TEMP_DIR" >/dev/null
 
-SERIAL_LOG=""; SERIAL_READER_PID=""
+# =============================================================================
+# CONSOLA SERIE (escritura directa al socket, NO qm sendkey)
+# =============================================================================
+SERIAL_PTY=""
+SERIAL_LOG=""
+SOCAT_PID=""
+READER_PID=""
 
-function serial_reader_start() {
-  serial_reader_stop
-  SERIAL_LOG="${TEMP_DIR}/serial-${VMID}.log"; : > "$SERIAL_LOG"
+function serial_start() {
+  serial_stop
+  SERIAL_LOG="${TEMP_DIR}/serial-${VMID}.log"
+  : > "$SERIAL_LOG"
+  SERIAL_PTY="${TEMP_DIR}/serial-${VMID}.pty"
+  rm -f "$SERIAL_PTY"
+
   command -v socat >/dev/null 2>&1 || { log_err "socat no instalado (apt install socat)"; return 1; }
+
   local sock="/var/run/qemu-server/${VMID}.serial0"
   for _ in $(seq 1 30); do [ -S "$sock" ] && break; sleep 1; done
-  [ -S "$sock" ] || { log_err "Socket $sock no aparece"; return 1; }
-  socat -u UNIX-CONNECT:"$sock" - >>"$SERIAL_LOG" 2>/dev/null &
-  SERIAL_READER_PID=$!; sleep 1
-  log_info "Serial reader PID=$SERIAL_READER_PID"
+  [ -S "$sock" ] || { log_err "Socket serie $sock no aparece"; return 1; }
+
+  # socat: socket QEMU <-> PTY en $SERIAL_PTY, espera a que abramos el slave
+  socat UNIX-CONNECT:"$sock" PTY,link="$SERIAL_PTY",raw,echo=0,waitslave &
+  SOCAT_PID=$!
+  for _ in $(seq 1 50); do [ -L "$SERIAL_PTY" ] && break; sleep 0.2; done
+  [ -L "$SERIAL_PTY" ] || { log_err "PTY $SERIAL_PTY no aparece"; return 1; }
+  kill -0 "$SOCAT_PID" 2>/dev/null || { log_err "socat murió"; return 1; }
+
+  # FD 3 = consola serie bidireccional
+  exec 3<>"$SERIAL_PTY"
+
+  # Lector en background: todo lo que llega del guest al log
+  stdbuf -o0 cat <&3 >> "$SERIAL_LOG" &
+  READER_PID=$!
+
+  sleep 1
+  log_info "Serial PTY activo: $SERIAL_PTY (socat=$SOCAT_PID reader=$READER_PID)"
+  return 0
 }
 
-function serial_reader_stop() {
-  if [ -n "${SERIAL_READER_PID:-}" ] && kill -0 "$SERIAL_READER_PID" 2>/dev/null; then
-    kill "$SERIAL_READER_PID" 2>/dev/null || true
-    wait "$SERIAL_READER_PID" 2>/dev/null || true
-  fi
-  SERIAL_READER_PID=""
+function serial_stop() {
+  exec 3>&- 2>/dev/null || true
+  if [ -n "${READER_PID:-}" ]; then kill "$READER_PID" 2>/dev/null || true; wait "$READER_PID" 2>/dev/null || true; fi
+  if [ -n "${SOCAT_PID:-}" ];  then kill "$SOCAT_PID" 2>/dev/null || true;  wait "$SOCAT_PID" 2>/dev/null || true; fi
+  READER_PID=""; SOCAT_PID=""
 }
 
-function wait_for_serial_pattern() {
+function send_line() {
+  log_dbg "TX->$1"
+  printf '%s\r' "$1" >&3 2>/dev/null || log_warn "Escritura en consola serie falló"
+  sleep 0.5
+}
+
+function wait_for_pattern() {
   local pat="$1" to="${2:-600}" label="${3:-$pat}" el=0
   [ -f "$SERIAL_LOG" ] || return 1
-  log_info "Esperando hasta ${to}s a: '$label'"
+  log_info "Esperando hasta ${to}s a '$label'"
   while [ $el -lt "$to" ]; do
     grep -qE "$pat" "$SERIAL_LOG" 2>/dev/null && { log_info "Match tras ${el}s"; return 0; }
     sleep 3; el=$((el+3))
@@ -159,35 +188,6 @@ function wait_for_serial_pattern() {
 function dump_serial_tail() {
   local n="${1:-30}"
   [ -f "$SERIAL_LOG" ] && { log_info "--- últimas $n líneas ---"; tail -n "$n" "$SERIAL_LOG" | sed 's/^/  | /'; log_info "--- fin ---"; }
-}
-
-function send_line_to_vm() {
-  log_dbg "TX -> $1"
-  local i c
-  for ((i=0; i<${#1}; i++)); do
-    c=${1:i:1}
-    case $c in
-      " ") c="spc";; "-") c="minus";; "=") c="equal";; ",") c="comma";; ".") c="dot";;
-      "/") c="slash";; "'") c="apostrophe";; ";") c="semicolon";; '\') c="backslash";;
-      '`') c="grave_accent";; "[") c="bracket_left";; "]") c="bracket_right";;
-      "_") c="shift-minus";; "+") c="shift-equal";; "?") c="shift-slash";;
-      "<") c="shift-comma";; ">") c="shift-dot";; '"') c="shift-apostrophe";;
-      ":") c="shift-semicolon";; "|") c="shift-backslash";; "~") c="shift-grave_accent";;
-      "{") c="shift-bracket_left";; "}") c="shift-bracket_right";;
-      A) c="shift-a";; B) c="shift-b";; C) c="shift-c";; D) c="shift-d";;
-      E) c="shift-e";; F) c="shift-f";; G) c="shift-g";; H) c="shift-h";;
-      I) c="shift-i";; J) c="shift-j";; K) c="shift-k";; L) c="shift-l";;
-      M) c="shift-m";; N) c="shift-n";; O) c="shift-o";; P) c="shift-p";;
-      Q) c="shift-q";; R) c="shift-r";; S) c="shift-s";; T) c="shift-t";;
-      U) c="shift-u";; V) c="shift-v";; W) c="shift-w";; X) c="shift-x";;
-      Y) c="shift-y";; Z) c="shift-z";;
-      "!") c="shift-1";; "@") c="shift-2";; "#") c="shift-3";; '$') c="shift-4";;
-      "%") c="shift-5";; "^") c="shift-6";; "&") c="shift-7";; "*") c="shift-8";;
-      "(") c="shift-9";; ")") c="shift-0";;
-    esac
-    qm sendkey $VMID "$c"
-  done
-  qm sendkey $VMID ret
 }
 
 # --- PROMPT ---
@@ -211,7 +211,7 @@ function ssh_check() {
   command -v pveversion >/dev/null 2>&1 || return 0
   [ -n "${SSH_CLIENT:+x}" ] || return 0
   whiptail --backtitle "Proxmox VE Helper Scripts" --defaultno --title "SSH" \
-    --yesno "Usar shell de Proxmox es mejor. ¿Continuar por SSH?" 10 62 || { clear; exit; }
+    --yesno "Usar el shell de Proxmox es mejor. ¿Continuar por SSH?" 10 62 || { clear; exit; }
 }
 function exit-script() { clear; echo "⚠ User exited"; exit; }
 function get_available_bridges() { ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | sort; }
@@ -292,7 +292,7 @@ fi
 msg_ok "Storage: $STORAGE"
 msg_ok "VM ID: $VMID"
 
-# --- RESOLVER URL ---
+# --- URL FreeBSD ---
 log_step "[06] Resolviendo FreeBSD ${FREEBSD_MAJOR}.x"
 RELEASE_LIST="$(curl -s https://download.freebsd.org/releases/VM-IMAGES/ | grep -Eo "${FREEBSD_MAJOR}\.[0-9]+-RELEASE" | sort -Vr | uniq)"
 log_info "Releases: $(echo $RELEASE_LIST | tr '\n' ' ')"
@@ -306,7 +306,6 @@ done
 [ -z "$URL" ] && { msg_error "No hay imagen FreeBSD ${FREEBSD_MAJOR}.x"; exit 115; }
 msg_ok "URL: $URL"
 
-# --- DESCARGA ---
 log_step "[07] Espacio"; check_disk_space "$TEMP_DIR" 20 || { msg_error "Espacio insuficiente"; exit 214; }
 log_step "[08] Descargando"; msg_info "Descargando $(basename $URL)"
 curl -f#SL -o "$(basename "$URL")" "$URL"; echo -en "\e[1A\e[0K"; msg_ok "Descargado"
@@ -317,7 +316,7 @@ FILE=FreeBSD.qcow2
 unxz -cv "$(basename "$URL")" > "$FILE" || { msg_error "Fallo al descomprimir"; exit 115; }
 rm -f "$(basename "$URL")"; msg_ok "Descomprimido: $FILE"
 
-# --- MAPEO STORAGE ---
+# --- MAPEO ---
 log_step "[10] Mapeando storage"
 STORAGE_TYPE=$(pvesm status -storage $STORAGE | awk 'NR>1 {print $2}')
 case $STORAGE_TYPE in
@@ -331,26 +330,16 @@ DISK0_REF="${STORAGE}:${DISK_REF}${DISK0}"
 DISK1_REF="${STORAGE}:${DISK_REF}${DISK1}"
 log_info "DISK0_REF=$DISK0_REF  DISK1_REF=$DISK1_REF"
 
-# =============================================================================
-# FASE 1: Crear VM con SOLO la interfaz WAN (net0 en vmbr1)
-# Motivo: la imagen de FreeBSD trae ifconfig_DEFAULT="DHCP" y dhclient se
-# cuelga infinitamente si una interfaz no recibe respuesta. Con una sola
-# interfaz (la WAN, que SÍ tiene DHCP en vmbr1) el arranque no se bloquea.
-# =============================================================================
+# --- CREAR VM (solo WAN) ---
 log_step "[11] qm create (solo WAN)"
 msg_info "Creando VM con interfaz WAN únicamente"
-if [ -n "$WAN_BRG" ]; then
-  WAN_MAC_FINAL="$WAN_MAC"
-else
-  # Modo single: usar LAN bridge como única interfaz, con MAC de LAN
-  WAN_BRG="$BRG"
-  WAN_MAC_FINAL="$MAC"
-fi
+if [ -n "$WAN_BRG" ]; then WAN_MAC_FINAL="$WAN_MAC"
+else WAN_BRG="$BRG"; WAN_MAC_FINAL="$MAC"; fi
 qm create $VMID ${MACHINE} -tablet 0 -localtime 1 -bios ovmf${CPU_TYPE} \
   -cores $CORE_COUNT -memory $RAM_SIZE -name $HN -tags community-script \
   -net0 virtio,bridge=$WAN_BRG,macaddr=$WAN_MAC_FINAL$VLAN$MTU \
   -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
-# Sin -agent 1 (evita reinicios por falta de QEMU guest agent)
+# Sin -agent 1 para evitar reinicios por falta de qemu guest agent
 
 log_step "[12] pvesm alloc"
 aa=1; am=4; ad=5
@@ -365,7 +354,6 @@ done
 msg_ok "efidisk asignada"
 
 log_step "[13] qm importdisk"
-msg_info "Importando disco"
 qm importdisk $VMID ${FILE} $STORAGE ${DISK_IMPORT:-} &>/dev/null
 msg_ok "Importado"
 
@@ -382,130 +370,127 @@ log_info "VM config inicial:"; qm config $VMID 2>&1 | tee -a "$LOG_FILE"
 
 # --- ARRANQUE ---
 log_step "[15] Iniciando VM"
-msg_ok "Arrancando VM"
 qm start $VMID
 sleep 5
 
-log_step "[16] Serial reader"
-serial_reader_start || { msg_error "Serial reader falló"; exit 1; }
+log_step "[16] Serial reader (PTY bidireccional)"
+serial_start || { msg_error "Serial no disponible"; exit 1; }
 sleep 3
 dump_serial_tail 20
 
+# --- LOGIN POR CONSOLA SERIE (NO qm sendkey) ---
 log_step "[17] Esperando login"
-msg_info "Esperando prompt 'login:'"
-if ! wait_for_serial_pattern "login:" 600 "FreeBSD login"; then
-  dump_serial_tail 80
-  msg_error "Sin login tras 600s"
-  exit 1
-fi
+wait_for_pattern "login: ?$" 600 "FreeBSD login" || { dump_serial_tail 80; msg_error "Sin login"; exit 1; }
 msg_ok "Login detectado"
 
-log_step "[18] Login root"
-send_line_to_vm "root"; sleep 3
-send_line_to_vm "";     sleep 3
+log_step "[18] Enviando 'root' por consola serie"
+send_line "root"
+sleep 2
 
-log_step "[19] Esperando shell root"
-if ! wait_for_serial_pattern "root@[^:]*:[^#]*#" 180 "root shell"; then
-  dump_serial_tail 40; msg_error "Sin shell root"; exit 1
-fi
-msg_ok "Shell root lista"
+log_step "[19] Esperando 'Password:'"
+wait_for_pattern "Password:" 120 "Password prompt" || { dump_serial_tail 30; }
+msg_ok "Password prompt recibido"
+
+log_step "[20] Enviando password vacío"
+send_line ""
+
+log_step "[21] Esperando shell root"
+wait_for_pattern "root@[^ ]*[:~]" 180 "root shell" || { dump_serial_tail 60; msg_error "Sin shell root"; exit 1; }
+msg_ok "Shell root lista en ttyu0"
 
 # --- BOOTSTRAP ---
-log_step "[20] Descargando bootstrap"
+log_step "[22] Descargando bootstrap"
 msg_info "fetch bootstrap"
-send_line_to_vm "fetch https://raw.githubusercontent.com/opnsense/update/master/src/bootstrap/opnsense-bootstrap.sh.in"
-sleep 10
+send_line "fetch https://raw.githubusercontent.com/opnsense/update/master/src/bootstrap/opnsense-bootstrap.sh.in"
+sleep 12
 dump_serial_tail 15
 
-log_step "[21] Ejecutando bootstrap"
-msg_ok "Ejecutando bootstrap (15-25 min)"
-send_line_to_vm "sh ./opnsense-bootstrap.sh.in -y -f -r ${var_version}"
+log_step "[23] Ejecutando bootstrap"
+msg_ok "Ejecutando bootstrap (~15-25 min)"
+send_line "sh ./opnsense-bootstrap.sh.in -y -f -r ${var_version}"
 
-log_step "[22] Esperando fin del bootstrap"
+log_step "[24] Esperando fin del bootstrap"
 el=0
 while [ $el -lt 2400 ]; do
   sleep 30; el=$((el+30))
-  if tail -n 80 "$SERIAL_LOG" | grep -qE "OPNsense.*login:|login: ?$"; then
-    log_info "Reboot detectado tras bootstrap ($((el/60)) min)"; break
+  # Tras el bootstrap, la VM reinicia a OPNsense y muestra su login
+  if tail -n 100 "$SERIAL_LOG" | grep -qE "OPNsense.*login:|login: ?$"; then
+    log_info "Reboot de OPNsense detectado ($((el/60)) min)"; break
   fi
-  (( el % 120 == 0 )) && { log_info "Bootstrap: $((el/60)) min"; dump_serial_tail 8; }
+  (( el % 120 == 0 )) && { log_info "Bootstrap: $((el/60)) min"; dump_serial_tail 10; }
 done
 msg_ok "Bootstrap terminado (~$((el/60)) min)"
 sleep 60
 
-# =============================================================================
-# FASE 2: apagar, añadir la LAN (net1 en vmbr0), arrancar de nuevo
-# =============================================================================
-log_step "[23] Añadiendo interfaz LAN"
+# --- AÑADIR LAN Y REARRANCAR ---
+log_step "[25] Añadiendo interfaz LAN"
 msg_info "Apagando VM para añadir la LAN"
 qm shutdown $VMID --timeout 90 2>/dev/null || qm stop $VMID
 sleep 10
-# En OPNsense, la primera interfaz (vtnet0) será la WAN.
-# Añadimos vtnet1 como LAN en vmbr0.
 qm set $VMID -net1 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU &>/dev/null
 msg_ok "LAN añadida en $BRG"
 
 log_info "VM config final:"; qm config $VMID 2>&1 | tee -a "$LOG_FILE"
 
-log_step "[24] Rearrancando VM"
+log_step "[26] Rearrancando VM"
 qm start $VMID
 sleep 10
-serial_reader_stop
-serial_reader_start || { msg_error "Serial reader falló"; exit 1; }
+serial_stop
+serial_start || { msg_error "Serial reader falló"; exit 1; }
 sleep 3
 
-log_step "[25] Esperando login de OPNsense"
-if ! wait_for_serial_pattern "login:" 600 "OPNsense login"; then
-  dump_serial_tail 60
-fi
+log_step "[27] Esperando login de OPNsense"
+wait_for_pattern "login: ?$" 600 "OPNsense login" || { dump_serial_tail 80; }
 msg_ok "Login OPNsense detectado"
 
-log_step "[26] Login OPNsense"
-send_line_to_vm "root";     sleep 4
-send_line_to_vm "opnsense"; sleep 10
-dump_serial_tail 20
+log_step "[28] Login root en OPNsense"
+send_line "root"
+sleep 2
+wait_for_pattern "Password:" 60 "Password" || true
+send_line "opnsense"
+sleep 8
+dump_serial_tail 25
 
-log_step "[27] Configurando interfaces"
+log_step "[29] Asignando interfaces (menú 1)"
 msg_info "Menú 1: asignar interfaces"
-send_line_to_vm "1"; sleep 5     # Assign interfaces
-send_line_to_vm "n"; sleep 3     # No LAGGs
-send_line_to_vm "n"; sleep 3     # No VLANs
+send_line "1"; sleep 5     # Assign interfaces
+send_line "n"; sleep 3     # No LAGGs
+send_line "n"; sleep 3     # No VLANs
 if [ -n "$WAN_BRG" ]; then
-  # vtnet0 = WAN (ya arrancado con dhclient), vtnet1 = LAN (recién añadido)
-  send_line_to_vm "vtnet0"; sleep 4    # WAN
-  send_line_to_vm "vtnet1"; sleep 4    # LAN
+  send_line "vtnet0"; sleep 4    # WAN
+  send_line "vtnet1"; sleep 4    # LAN
 else
-  send_line_to_vm "";       sleep 4
-  send_line_to_vm "vtnet0"; sleep 4
+  send_line "";       sleep 4
+  send_line "vtnet0"; sleep 4
 fi
-send_line_to_vm ""; sleep 3
-send_line_to_vm "y"; sleep 10
-dump_serial_tail 30
+send_line ""; sleep 3
+send_line "y"; sleep 12
+dump_serial_tail 40
 
-log_step "[28] Configurando LAN IP"
+log_step "[30] LAN IP estática"
 if [ -n "$IP_ADDR" ] && [ -n "$NETMASK" ]; then
   msg_info "LAN: $IP_ADDR/$NETMASK"
-  send_line_to_vm "2"; sleep 5     # Set interface IP
-  send_line_to_vm "2"; sleep 4     # LAN (opción 2)
-  send_line_to_vm "$IP_ADDR"; sleep 4
-  send_line_to_vm "$NETMASK"; sleep 4
-  send_line_to_vm ""; sleep 4      # Gateway vacío
-  send_line_to_vm ""; sleep 4      # IPv6 vacío
-  send_line_to_vm "y"; sleep 4     # DHCP server sí
+  send_line "2"; sleep 5     # Set interface IP
+  send_line "2"; sleep 4     # LAN (opción 2)
+  send_line "$IP_ADDR"; sleep 4
+  send_line "$NETMASK"; sleep 4
+  send_line ""; sleep 4      # Gateway
+  send_line ""; sleep 4      # IPv6
+  send_line "y"; sleep 4     # DHCP server
   DS=$(echo "$IP_ADDR" | awk -F. '{print $1"."$2"."$3".100"}')
   DE=$(echo "$IP_ADDR" | awk -F. '{print $1"."$2"."$3".199"}')
-  send_line_to_vm "$DS"; sleep 4
-  send_line_to_vm "$DE"; sleep 4
-  send_line_to_vm "n"; sleep 3     # No revertir HTTP
-  send_line_to_vm ""; sleep 6
+  send_line "$DS"; sleep 4
+  send_line "$DE"; sleep 4
+  send_line "n"; sleep 3
+  send_line ""; sleep 6
   msg_ok "LAN configurada: $IP_ADDR/$NETMASK"
 fi
 
-log_step "[29] Volviendo al menú"
-send_line_to_vm "0"; sleep 4
+log_step "[31] Volviendo al menú"
+send_line "0"; sleep 4
 
-log_step "[30] Finalizado"
-serial_reader_stop || true
+log_step "[32] Finalizado"
+serial_stop || true
 msg_ok "OPNsense VM lista"
 echo
 msg_ok "WebUI: https://${IP_ADDR}"
