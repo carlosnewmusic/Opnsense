@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: CrazyWolf13
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -39,19 +41,12 @@ function update_script() {
     systemctl stop wealthfolio
     msg_ok "Stopped Service"
 
-    msg_info "Backing up Data"
-    cp -r /opt/wealthfolio_data /opt/wealthfolio_data_backup
-    cp /opt/wealthfolio/.env /opt/wealthfolio_env_backup
-    msg_ok "Backed up Data"
+    create_backup /opt/wealthfolio_data /opt/wealthfolio/.env
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "wealthfolio" "wealthfolio/wealthfolio" "prebuild" "latest" "/opt/wealthfolio" "wealthfolio-server-*-linux-amd64.tar.gz"
-    install -m 755 /opt/wealthfolio/wealthfolio-server /usr/local/bin/wealthfolio-server
 
-    msg_info "Restoring Data"
-    cp -r /opt/wealthfolio_data_backup/. /opt/wealthfolio_data
-    cp /opt/wealthfolio_env_backup /opt/wealthfolio/.env
-    rm -rf /opt/wealthfolio_data_backup /opt/wealthfolio_env_backup
-    msg_ok "Restored Data"
+    restore_backup
+    install -m 755 /opt/wealthfolio/wealthfolio-server /usr/local/bin/wealthfolio-server
 
     msg_info "Starting Service"
     systemctl start wealthfolio

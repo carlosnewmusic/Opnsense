@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Dunky13
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-2048}"
 var_disk="${var_disk:-5}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -29,21 +31,18 @@ function update_script() {
   fi
 
   if check_for_gh_release "wishlist" "cmintey/wishlist"; then
-    NODE_VERSION="24" NODE_MODULE="pnpm" setup_nodejs
+    NODE_VERSION="24" NODE_MODULE="pnpm@11" setup_nodejs
 
     msg_info "Stopping Service"
     systemctl stop wishlist
     msg_ok "Stopped Service"
 
-    msg_info "Creating Backup"
-    mkdir -p /opt/wishlist-backup
-    cp /opt/wishlist/.env /opt/wishlist-backup/.env
-    cp -a /opt/wishlist/uploads /opt/wishlist-backup
-    cp -a /opt/wishlist/data /opt/wishlist-backup
-    msg_ok "Created Backup"
+    create_backup /opt/wishlist/.env /opt/wishlist/uploads /opt/wishlist/data
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "wishlist" "cmintey/wishlist" "tarball"
     LATEST_APP_VERSION=$(get_latest_github_release "cmintey/wishlist")
+
+    restore_backup
 
     msg_info "Updating Wishlist"
     cd /opt/wishlist
@@ -56,13 +55,6 @@ function update_script() {
     $STD pnpm run build
     $STD pnpm prune --prod
     chmod +x /opt/wishlist/entrypoint.sh
-
-    msg_info "Restoring Backup"
-    cp /opt/wishlist-backup/.env /opt/wishlist/.env
-    cp -a /opt/wishlist-backup/uploads /opt/wishlist
-    cp -a /opt/wishlist-backup/data /opt/wishlist
-    rm -rf /opt/wishlist-backup
-    msg_ok "Restored Backup"
     
     msg_ok "Updated Wishlist"
     msg_info "Starting Service"

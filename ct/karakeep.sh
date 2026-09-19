@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 tteck
 # Author: MickLesk (Canbiz) & vhsdream
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-4096}"
 var_disk="${var_disk:-15}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -88,12 +90,13 @@ EOF
       $STD corepack disable
     fi
     sed -i "s/^SERVER_VERSION=.*$/SERVER_VERSION=${CHECK_UPDATE_RELEASE#v}/" /etc/karakeep/karakeep.env
+    # Node 24.19.x crashes better-sqlite3 on cleanup (karakeep-app/karakeep#2989); stay on 22 LTS until upstream reverts.
     MODULE_VERSION="$(jq -r '.packageManager | split("@")[1]' /opt/karakeep/package.json)"
-    NODE_VERSION="24" NODE_MODULE="pnpm@${MODULE_VERSION}" setup_nodejs
+    NODE_VERSION="22" NODE_MODULE="corepack,pnpm@${MODULE_VERSION}" setup_nodejs
     setup_meilisearch
 
     msg_info "Updating Karakeep"
-    corepack enable
+
     export PUPPETEER_SKIP_DOWNLOAD="true"
     export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD="true"
     export NEXT_TELEMETRY_DISABLED=1
@@ -101,8 +104,9 @@ EOF
     cd /opt/karakeep/apps/web 
     $STD pnpm install --frozen-lockfile
     $STD pnpm build
-    cd /opt/karakeep/apps/workers 
+    cd /opt/karakeep/apps/workers
     $STD pnpm install --frozen-lockfile
+    $STD pnpm rebuild better-sqlite3
     $STD pnpm build
     cd /opt/karakeep/apps/cli 
     $STD pnpm install --frozen-lockfile

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
@@ -13,7 +15,7 @@ var_ram="${var_ram:-10240}"
 var_disk="${var_disk:-20}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -31,23 +33,22 @@ function update_script() {
     exit
   fi
 
+  NODE_VERSION="24" NODE_MODULE="corepack" setup_nodejs
+
   if check_for_gh_release "twenty" "twentyhq/twenty"; then
     msg_info "Stopping Services"
     systemctl stop twenty-worker twenty-server
     msg_ok "Stopped Services"
 
     create_backup /opt/twenty/.env \
-                  /opt/twenty/packages/twenty-server/.local-storage
+      /opt/twenty/packages/twenty-server/.local-storage
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "twenty" "twentyhq/twenty" "tarball"
-
-    msg_info "Restoring Configuration"
-    cp /opt/twenty.env.bak /opt/twenty/.env
-    msg_ok "Restored Configuration"
+    restore_backup
 
     msg_info "Building Application"
     cd /opt/twenty
     export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-    $STD corepack enable
+
     $STD corepack prepare yarn@4.9.2 --activate
     export NODE_OPTIONS="--max-old-space-size=3072"
     $STD yarn install --immutable || $STD yarn install
@@ -64,8 +65,6 @@ function update_script() {
     $STD npx -y typeorm migration:run -d dist/database/typeorm/core/core.datasource
     msg_ok "Ran Database Migrations"
 
-    restore_backup
-
     msg_info "Starting Services"
     systemctl start twenty-server twenty-worker
     msg_ok "Started Services"
@@ -80,5 +79,5 @@ description
 
 msg_ok "Completed Successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
-echo -e "${INFO}${YW} Access it using the following URL:${CL}"
-echo -e "${TAB}${GATEWAY}${BGN}http://${IP}:3000${CL}"
+echo -e "${INFO}${YW}Access it using the following URL:${CL}"
+echo -e "${GATEWAY}${BGN}http://${IP}:3000${CL}"

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -33,14 +35,13 @@ function update_script() {
       systemctl stop meilisearch-ui
       msg_ok "Stopped Meilisearch-UI"
 
-      cp /opt/meilisearch-ui/.env.local /tmp/.env.local.bak
-      rm -rf /opt/meilisearch-ui
-      fetch_and_deploy_gh_release "meilisearch-ui" "riccox/meilisearch-ui" "tarball"
+      create_backup /opt/meilisearch-ui/.env.local
+      CLEAN_INSTALL=1 fetch_and_deploy_gh_release "meilisearch-ui" "riccox/meilisearch-ui" "tarball"
+      restore_backup
 
       msg_info "Configuring Meilisearch-UI"
       cd /opt/meilisearch-ui
       sed -i 's|const hash = execSync("git rev-parse HEAD").toString().trim();|const hash = "unknown";|' /opt/meilisearch-ui/vite.config.ts
-      mv /tmp/.env.local.bak /opt/meilisearch-ui/.env.local
       $STD pnpm install
       msg_ok "Configured Meilisearch-UI"
 

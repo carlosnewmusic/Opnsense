@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (Canbiz)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-2048}"
 var_disk="${var_disk:-7}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -41,21 +43,19 @@ function update_script() {
     systemctl stop apache2
     msg_ok "Stopped Apache2"
 
-    msg_info "Backing up Kimai configuration and var directory"
-    mkdir -p "$BACKUP_DIR"
-    [ -d /opt/kimai/var ] && cp -r /opt/kimai/var "$BACKUP_DIR/"
-    [ -f /opt/kimai/.env ] && cp /opt/kimai/.env "$BACKUP_DIR/"
-    [ -f /opt/kimai/config/packages/local.yaml ] && cp /opt/kimai/config/packages/local.yaml "$BACKUP_DIR/"
-    msg_ok "Backup completed"
-
+    create_backup /opt/kimai/var \
+      /opt/kimai/.env \
+      /opt/kimai/config/packages/local.yaml
     fetch_and_deploy_gh_release "kimai" "kimai/kimai" "tarball"
+    restore_backup
 
     msg_info "Updating Kimai"
-    [ -d "$BACKUP_DIR/var" ] && cp -r "$BACKUP_DIR/var" /opt/kimai/
-    [ -f "$BACKUP_DIR/.env" ] && cp "$BACKUP_DIR/.env" /opt/kimai/
-    [ -f "$BACKUP_DIR/local.yaml" ] && cp "$BACKUP_DIR/local.yaml" /opt/kimai/config/packages/
-    rm -rf "$BACKUP_DIR"
-    cd /opt/kimai 
+    if grep -q "^APP_SECRET=$" /opt/kimai/.env; then
+      APP_SECRET=$(openssl rand -hex 48)
+      sed -i "s|^APP_SECRET=.*|APP_SECRET=${APP_SECRET}|" /opt/kimai/.env
+    fi
+
+    cd /opt/kimai
     sed -i '/^admin_lte:/,/^[^[:space:]]/d' config/packages/local.yaml
     $STD composer install --no-dev --optimize-autoloader
     $STD bin/console kimai:update

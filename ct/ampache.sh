@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (Canbiz)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_cpu="${var_cpu:-4}"
 var_ram="${var_ram:-2048}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -39,7 +41,15 @@ function update_script() {
       /opt/ampache/public/play/.htaccess \
       /opt/ampache/advanced-config
 
-    fetch_and_deploy_gh_release "Ampache" "ampache/ampache" "prebuild" "latest" "/opt/ampache" "ampache-*_all_php8.4.zip"
+    if ! dpkg -l 2>/dev/null | grep -q "libapache2-mod-php8.5"; then
+      PHP_VERSION="8.5" PHP_APACHE="YES" setup_php
+      sed -i -e 's/upload_max_filesize = .*/upload_max_filesize = 100M/' \
+        -e 's/post_max_size = .*/post_max_size = 100M/' \
+        -e 's/max_execution_time = .*/max_execution_time = 600/' \
+        -e 's/memory_limit = .*/memory_limit = 512M/' /etc/php/8.5/apache2/php.ini
+    fi
+
+    fetch_and_deploy_gh_release "Ampache" "ampache/ampache" "prebuild" "latest" "/opt/ampache" "ampache-*_all_php8.5.zip"
 
     restore_backup
     chmod 664 /opt/ampache/public/rest/.htaccess /opt/ampache/public/play/.htaccess

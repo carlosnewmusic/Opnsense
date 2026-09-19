@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-2048}"
 var_disk="${var_disk:-10}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -35,22 +37,18 @@ function update_script() {
     systemctl stop papra
     msg_ok "Stopped Service"
 
-    msg_info "Backing up Configuration"
-    if [[ -f /opt/papra/apps/papra-server/.env ]]; then
-      cp /opt/papra/apps/papra-server/.env /opt/papra_env.bak
-    fi
-    msg_ok "Backed up Configuration"
+    create_backup /opt/papra/apps/papra-server/.env
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "papra" "papra-hq/papra" "tarball"
+
+    restore_backup
 
     pnpm_version=$(grep -oP '"packageManager":\s*"pnpm@\K[^"]+' /opt/papra/package.json)
     NODE_VERSION="26" NODE_MODULE="pnpm@$pnpm_version" setup_nodejs
 
     msg_info "Building Application"
     cd /opt/papra
-    if [[ -f /opt/papra_env.bak ]]; then
-      cp /opt/papra_env.bak /opt/papra/apps/papra-server/.env
-    else
+    if [[ ! -f /opt/papra/apps/papra-server/.env ]]; then
       msg_warn ".env missing, regenerating from defaults"
       LOCAL_IP=$(hostname -I | awk '{print $1}')
       cat <<EOF >/opt/papra/apps/papra-server/.env
@@ -74,7 +72,6 @@ EOF
     $STD pnpm --filter "@papra/app-client..." run build
     $STD pnpm --filter "@papra/app-server..." run build
     ln -sf /opt/papra/apps/papra-client/dist /opt/papra/apps/papra-server/public
-    rm -f /opt/papra_env.bak
     msg_ok "Built Application"
 
     msg_info "Starting Service"

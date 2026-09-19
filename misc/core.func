@@ -10,14 +10,15 @@
 # including colors, formatting, validation checks, message output, and
 # execution helpers used throughout the Community-Scripts ecosystem.
 #
-# Usage:
-#   source <(curl -fsSL https://git.community-scripts.org/.../core.func)
-#   load_functions
-#
 # ==============================================================================
 
 [[ -n "${_CORE_FUNC_LOADED:-}" ]] && return
 _CORE_FUNC_LOADED=1
+
+if [[ -z "${HOME:-}" ]]; then
+  HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+  export HOME="${HOME:-/root}"
+fi
 
 # ==============================================================================
 # SECTION 1: INITIALIZATION & SETUP
@@ -300,6 +301,72 @@ root_check() {
 }
 
 # ------------------------------------------------------------------------------
+# on_pve_host()
+#
+# - Returns 0 when executed on a Proxmox VE node, 1 otherwise
+# - Cheap probe used by the guards below; never exits on its own
+# ------------------------------------------------------------------------------
+on_pve_host() {
+  command -v pveversion &>/dev/null
+}
+
+# ------------------------------------------------------------------------------
+# require_pve_host()
+#
+# - Guard for tools that drive the node itself (pct/pveam/pvesm/pvesh/qm)
+# - Aborts when not on a PVE node, then validates the PVE version
+# ------------------------------------------------------------------------------
+require_pve_host() {
+  if ! on_pve_host; then
+    msg_error "${APP:-This script} must be run on the Proxmox VE host."
+    msg_error "Proxmox tooling (pct/pveam/pvesm/qm) is not available here."
+    exit 232
+  fi
+  pve_check
+}
+
+# ------------------------------------------------------------------------------
+# confirm_not_pve_host()
+#
+# - Guard for tools that belong inside an LXC/VM but would technically run
+#   on the node as well
+# - Warns and asks for confirmation instead of hard-failing
+# ------------------------------------------------------------------------------
+confirm_not_pve_host() {
+  on_pve_host || return 0
+
+  msg_error "Running on the Proxmox VE host is NOT recommended!"
+  msg_error "${APP:-This script} is meant to be executed inside an LXC container."
+  echo ""
+  echo -n "${TAB:-  }Continue anyway? (y/N): "
+  local confirm
+  read -r confirm
+  if [[ ! "${confirm,,}" =~ ^(y|yes)$ ]]; then
+    msg_warn "Aborted. Please run this inside an LXC container."
+    exit 0
+  fi
+  msg_warn "Proceeding on the Proxmox VE host at your own risk!"
+}
+
+# ------------------------------------------------------------------------------
+# require_debian_like()
+#
+# - Guard for addons that have no Alpine code path
+# - Aborts early instead of failing halfway through with apt/systemd errors
+# ------------------------------------------------------------------------------
+require_debian_like() {
+  if is_alpine; then
+    msg_error "${APP:-This script} does not support Alpine Linux."
+    msg_error "Please use a Debian or Ubuntu based LXC container."
+    exit 238
+  fi
+  if ! command -v apt-get &>/dev/null; then
+    msg_error "${APP:-This script} requires a Debian or Ubuntu based system."
+    exit 238
+  fi
+}
+
+# ------------------------------------------------------------------------------
 # pve_check()
 #
 # - Validates Proxmox VE version compatibility
@@ -308,6 +375,10 @@ root_check() {
 # ------------------------------------------------------------------------------
 pve_check() {
   local PVE_VER
+  if ! on_pve_host; then
+    msg_error "${APP:-This script} must be run on the Proxmox VE host."
+    exit 232
+  fi
   PVE_VER="$(pveversion | awk -F'/' '{print $2}' | awk -F'-' '{print $1}')"
 
   # Check for Proxmox VE 8.x: allow 8.0–8.9
@@ -358,6 +429,27 @@ arch_check() {
     sleep 2
     exit 106
   fi
+}
+
+# ------------------------------------------------------------------------------
+# arch_resolve()
+#
+# - Selects an architecture-specific value while preserving amd64 defaults
+# - Usage: arch_resolve "amd64-value" "arm64-value"
+# - Defaults: amd64="amd64", arm64="arm64"
+# ------------------------------------------------------------------------------
+arch_resolve() {
+  local amd64_val="${1:-amd64}"
+  local arm64_val="${2:-arm64}"
+  local arch="${PCT_ARCH:-$(dpkg --print-architecture 2>/dev/null || uname -m)}"
+  case "$arch" in
+  amd64 | x86_64) echo "$amd64_val" ;;
+  arm64 | aarch64) echo "$arm64_val" ;;
+  *)
+    msg_error "Unsupported architecture: $arch"
+    return 106
+    ;;
+  esac
 }
 
 # ------------------------------------------------------------------------------
@@ -525,6 +617,12 @@ silent() {
   set +Eeuo pipefail
   trap - ERR
 
+  # Byte offset BEFORE the command runs - everything the log grows by is
+  # exactly this command's output (used for the .errinfo telemetry capture)
+  local start_bytes=0
+  [[ -f "$logfile" ]] && start_bytes=$(stat -c%s "$logfile" 2>/dev/null || echo 0)
+  [[ ! "$start_bytes" =~ ^[0-9]+$ ]] && start_bytes=0
+
   "$@" >>"$logfile" 2>&1
   local rc=$?
 
@@ -546,12 +644,43 @@ silent() {
     export _SILENT_FAILED_LINE="$caller_line"
     export _SILENT_FAILED_LOG="$logfile"
 
+    # ── Structured error capture (.errinfo) for telemetry ──
+    # Extract exactly THIS command's output (from the recorded byte offset),
+    # strip ANSI/progress noise, keep the last 60 lines. The host builds the
+    # telemetry error trace from this file (pulled from the container on
+    # failure). Self-contained - containers don't source api.func.
+    {
+      local flat_cmd
+      flat_cmd=$(printf '%s' "$cmd" | tr '\n' ' ' | head -c 300)
+      echo "EXIT_CODE=${rc}"
+      echo "LINE=${caller_line}"
+      echo "COMMAND=${flat_cmd}"
+      echo "--- OUTPUT ---"
+      if [[ -s "$logfile" ]]; then
+        local segment
+        segment=$(tail -c +"$((start_bytes + 1))" "$logfile" 2>/dev/null |
+          sed 's/\r$//' |
+          sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' |
+          grep -avE '^(Get:|Hit:|Ign:|Fetched |Reading package lists|Reading state information|Building dependency tree|Selecting previously|Preparing to unpack|Unpacking |Processing triggers for|\(Reading database|[0-9]+%[[:space:]]*\[)' |
+          grep -avE '^[[:space:]]*$' |
+          tail -n 60)
+        # If the noise filter swallowed everything, fall back to the raw tail
+        if [[ -z "$segment" ]]; then
+          segment=$(tail -c +"$((start_bytes + 1))" "$logfile" 2>/dev/null |
+            sed 's/\r$//' | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | tail -n 60)
+        fi
+        printf '%s' "$segment" | head -c 10240
+      fi
+    } >"${logfile}.errinfo" 2>/dev/null || true
+
     return "$rc"
   fi
 
   # Clear stale flags on success (prevents false positives if a previous
   # $STD cmd || true failed and a later non-silent command triggers error_handler)
   unset _SILENT_FAILED_RC _SILENT_FAILED_CMD _SILENT_FAILED_LINE _SILENT_FAILED_LOG 2>/dev/null || true
+  # Also drop a stale .errinfo from a previously tolerated failure ($STD cmd || true)
+  rm -f "${logfile}.errinfo" 2>/dev/null || true
 }
 
 # ------------------------------------------------------------------------------
@@ -696,7 +825,7 @@ msg_info() {
     # Pause mode: Wait for Enter after each step
     if [[ "${DEV_MODE_PAUSE:-false}" == "true" ]]; then
       echo -en "\n${YWB}[PAUSE]${CL} Press Enter to continue..." >&2
-      read -r
+      read -r </dev/tty
     fi
     return
   fi
@@ -711,7 +840,7 @@ msg_info() {
   if [[ "${DEV_MODE_PAUSE:-false}" == "true" ]]; then
     stop_spinner
     echo -en "\n${YWB}[PAUSE]${CL} Press Enter to continue..." >&2
-    read -r
+    read -r </dev/tty
   fi
 }
 
@@ -915,6 +1044,39 @@ ensure_tput() {
 }
 
 # ------------------------------------------------------------------------------
+# reclaim_tty()
+#
+# - Reclaims the controlling terminal's foreground process group
+# - lxc-attach takes the terminal and does not hand it back, leaving us in a
+#   background process group. Reading from the terminal then returns EIO
+#   instead of blocking, because SIGTTIN is ignored during recovery - so the
+#   prompt fails before the user can answer and their keystroke leaks into the
+#   parent shell. Redirecting to /dev/tty does not help: the rule applies to
+#   the terminal, not to the file descriptor.
+# - pct exec/pull/enter use lxc-attach internally, so the terminal can be taken
+#   away again at any point. Call this immediately before each interactive
+#   read, not once after the install.
+# - SIGTTOU is ignored inside perl so tcsetpgrp() succeeds instead of stopping
+#   us. No-op when we already are in the foreground or there is no terminal.
+#   perl is a hard dependency of Proxmox VE.
+# ------------------------------------------------------------------------------
+reclaim_tty() {
+  command -v perl >/dev/null 2>&1 || return 0
+  [[ -e /dev/tty ]] || return 0
+
+  local pgid
+  pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ') || true
+
+  perl -e '
+    use POSIX;
+    $SIG{TTOU} = "IGNORE";
+    my $pgid = $ARGV[0] || POSIX::getpgrp();
+    open(my $t, "+<", "/dev/tty") or exit 1;
+    POSIX::tcsetpgrp(fileno($t), $pgid) or exit 1;
+  ' "${pgid:-0}" 2>/dev/null || true
+}
+
+# ------------------------------------------------------------------------------
 # is_alpine()
 #
 # - Detects if running on Alpine Linux
@@ -947,6 +1109,53 @@ is_alpine() {
 is_verbose_mode() {
   local verbose="${VERBOSE:-${var_verbose:-no}}"
   [[ "$verbose" != "no" ]]
+}
+
+# ------------------------------------------------------------------------------
+# configure_http_proxy()
+#
+# - Applies var_http_proxy / var_http_no_proxy inside the container
+# - Persists proxy env for login shells, systemd, and package managers
+# - Skips APT proxy config when APT Cacher-NG is active
+# ------------------------------------------------------------------------------
+configure_http_proxy() {
+  local proxy="${HTTP_PROXY:-${http_proxy:-${var_http_proxy:-}}}"
+  local noproxy="${HTTP_NO_PROXY:-${no_proxy:-${var_http_no_proxy:-}}}"
+  [[ -z "$proxy" ]] && return 0
+  [[ -z "$noproxy" ]] && noproxy="localhost,127.0.0.1,.local"
+
+  msg_info "Configuring HTTP proxy"
+  cat >/etc/profile.d/90-http-proxy.sh <<EOF
+export http_proxy="$proxy"
+export https_proxy="$proxy"
+export HTTP_PROXY="$proxy"
+export HTTPS_PROXY="$proxy"
+export no_proxy="$noproxy"
+export NO_PROXY="$noproxy"
+EOF
+  chmod 644 /etc/profile.d/90-http-proxy.sh
+
+  if ! grep -q '^http_proxy=' /etc/environment 2>/dev/null; then
+    cat >>/etc/environment <<EOF
+http_proxy=$proxy
+https_proxy=$proxy
+HTTP_PROXY=$proxy
+HTTPS_PROXY=$proxy
+no_proxy=$noproxy
+NO_PROXY=$noproxy
+EOF
+  fi
+
+  if [[ "${CACHER:-}" != "yes" && -d /etc/apt/apt.conf.d ]]; then
+    cat >/etc/apt/apt.conf.d/95http-proxy <<EOF
+Acquire::http::Proxy "$proxy";
+Acquire::https::Proxy "$proxy";
+EOF
+  fi
+
+  export http_proxy="$proxy" https_proxy="$proxy" HTTP_PROXY="$proxy" HTTPS_PROXY="$proxy"
+  export no_proxy="$noproxy" NO_PROXY="$noproxy"
+  msg_ok "Configured HTTP proxy"
 }
 
 # ------------------------------------------------------------------------------
@@ -1112,7 +1321,7 @@ prompt_confirm() {
   # Interactive prompt with timeout
   echo -en "${YW}${message} ${hint} (auto-${default} in ${timeout}s): ${CL}"
 
-  if read -t "$timeout" -r response; then
+  if read -t "$timeout" -r response </dev/tty; then
     # User provided input
     response="${response,,}" # lowercase
     case "$response" in
@@ -1205,7 +1414,7 @@ prompt_input() {
   # Interactive prompt with timeout
   echo -en "${YW}${message}${hint} (auto-default in ${timeout}s): ${CL}" >&2
 
-  if read -t "$timeout" -r response; then
+  if read -t "$timeout" -r response </dev/tty; then
     # User provided input (or pressed Enter for empty)
     if [[ -n "$response" ]]; then
       echo "$response"
@@ -1307,7 +1516,7 @@ prompt_input_required() {
 
     echo -en "${YW}${message} (required, timeout ${timeout}s): ${CL}" >&2
 
-    if read -t "$timeout" -r response; then
+    if read -t "$timeout" -r response </dev/tty; then
       if [[ -z "$response" ]]; then
         echo -e "${YW}This field is required. Please enter a value. (attempt ${attempts}/3)${CL}" >&2
       fi
@@ -1402,7 +1611,7 @@ prompt_select() {
   echo -en "${YW}Select [1-${num_options}] (auto-select ${default} in ${timeout}s): ${CL}" >&2
 
   local response
-  if read -t "$timeout" -r response; then
+  if read -t "$timeout" -r response </dev/tty; then
     if [[ -z "$response" ]]; then
       # Empty response, use default
       echo "${options[$((default - 1))]}"
@@ -1485,7 +1694,7 @@ prompt_password() {
   # Interactive prompt with timeout (silent input)
   echo -en "${YW}${message}${hint} (timeout ${timeout}s): ${CL}" >&2
 
-  if read -t "$timeout" -rs response; then
+  if read -t "$timeout" -rs response </dev/tty; then
     echo "" >&2 # Newline after hidden input
     if [[ -n "$response" ]]; then
       # Validate minimum length

@@ -7,8 +7,13 @@
 
 if ! command -v curl &>/dev/null; then
   printf "\r\e[2K%b" '\033[93m Setup Source \033[m' >&2
-  apt-get update >/dev/null 2>&1
-  apt-get install -y curl >/dev/null 2>&1
+  if [[ -f /etc/alpine-release ]]; then
+    apk update >/dev/null 2>&1
+    apk add --no-cache curl >/dev/null 2>&1
+  else
+    apt-get update >/dev/null 2>&1
+    apt-get install -y curl >/dev/null 2>&1
+  fi
 fi
 source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/core.func)
 source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/tools.func)
@@ -33,7 +38,6 @@ LOG_PATH="/var/log/copyparty"
 DATA_PATH="/var/lib/copyparty"
 SVC_USER="copyparty"
 SVC_GROUP="copyparty"
-SRC_URL="https://github.com/9001/copyparty/releases/latest/download/copyparty-sfx.py"
 DEFAULT_PORT=3923
 
 # ==============================================================================
@@ -45,27 +49,12 @@ if [[ -f "/etc/alpine-release" ]]; then
   SERVICE_PATH="/etc/init.d/copyparty"
 elif grep -qE 'ID=debian|ID=ubuntu' /etc/os-release; then
   OS="Debian"
-  PKG_MANAGER="apt-get install -y"
+  PKG_MANAGER="apt install -y"
   SERVICE_PATH="/etc/systemd/system/copyparty.service"
 else
   msg_error "Unsupported OS detected. Exiting."
   exit 238
 fi
-
-# ==============================================================================
-# HEADER
-# ==============================================================================
-function header_info() {
-  clear
-  cat <<"EOF"
-   ______                  ____             __
-  / ____/___  ____  __  __/ __ \____ ______/ /___  __
- / /   / __ \/ __ \/ / / / /_/ / __ `/ ___/ __/ / / /
-/ /___/ /_/ / /_/ / /_/ / ____/ /_/ / /  / /_/ /_/ /
-\____/\____/ .___/\__, /_/    \__,_/_/   \__/\__, /
-          /_/    /____/                     /____/
-EOF
-}
 
 # ==============================================================================
 # HELPER FUNCTIONS
@@ -125,11 +114,8 @@ function update() {
     fi
     msg_ok "Stopped service"
 
-    msg_info "Updating ${APP}"
-    curl -fsSL "$SRC_URL" -o "$BIN_PATH"
-    chmod +x "$BIN_PATH"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "copyparty-sfx.py" "9001/copyparty" "singlefile" "latest" "/usr/local/bin" "copyparty-sfx.py"
     chown "$SVC_USER:$SVC_GROUP" "$BIN_PATH"
-    msg_ok "Updated ${APP}"
 
     msg_info "Starting service"
     if [[ "$OS" == "Alpine" ]]; then
@@ -173,9 +159,17 @@ function install() {
 
   msg_info "Installing dependencies"
   if [[ "$OS" == "Debian" ]]; then
-    $STD $PKG_MANAGER python3 python3-pil ffmpeg curl
+    $STD $PKG_MANAGER \
+      python3 \
+      python3-pil \
+      ffmpeg \
+      curl
   else
-    $STD $PKG_MANAGER python3 py3-pillow ffmpeg curl
+    $STD $PKG_MANAGER \
+      python3 \
+      py3-pillow \
+      ffmpeg \
+      curl
   fi
   msg_ok "Dependencies installed (with thumbnail support)"
 
@@ -188,11 +182,8 @@ function install() {
     chown "$SVC_USER:$SVC_GROUP" "$DATA_PATH"
   fi
 
-  msg_info "Downloading ${APP}"
-  curl -fsSL "$SRC_URL" -o "$BIN_PATH"
-  chmod +x "$BIN_PATH"
+  USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "copyparty-sfx.py" "9001/copyparty" "singlefile" "latest" "/usr/local/bin" "copyparty-sfx.py"
   chown "$SVC_USER:$SVC_GROUP" "$BIN_PATH"
-  msg_ok "Downloaded to ${BIN_PATH}"
 
   msg_info "Creating configuration"
   cat <<EOF >"$CONF_PATH"

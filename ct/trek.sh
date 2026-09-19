@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
-# Source: https://github.com/mauriceboe/TREK
+# Source: https://github.com/liketrek/TREK
 
 APP="TREK"
 var_tags="${var_tags:-travel;planning;collaboration}"
@@ -12,7 +14,7 @@ var_ram="${var_ram:-2048}"
 var_disk="${var_disk:-8}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -32,7 +34,7 @@ function update_script() {
 
   NODE_VERSION="24" setup_nodejs
 
-  if check_for_gh_release "trek" "mauriceboe/TREK"; then
+  if check_for_gh_release "trek" "liketrek/TREK"; then
     MIGRATION=0
     grep -qF "ExecStart=/usr/bin/node --import tsx src/index.ts" \
       /etc/systemd/system/trek.service && MIGRATION=1
@@ -47,7 +49,7 @@ function update_script() {
       /opt/trek/data \
       /opt/trek/uploads
 
-    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "trek" "mauriceboe/TREK" "tarball"
+    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "trek" "liketrek/TREK" "tarball"
 
     msg_info "Building TREK"
     cd /opt/trek
@@ -79,7 +81,7 @@ function update_script() {
       cat <<EOF >/etc/systemd/system/trek.service
 [Unit]
 Description=TREK Travel Planner
-Documentation=https://github.com/mauriceboe/TREK
+Documentation=https://github.com/liketrek/TREK
 After=network-online.target
 Wants=network-online.target
 

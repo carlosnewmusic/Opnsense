@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Thiago Canozzo Lahr (tclahr)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-1024}"
 var_disk="${var_disk:-8}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -30,14 +32,31 @@ function update_script() {
     exit
   fi
 
+  if ! dotnet --list-sdks 2>/dev/null | grep -q '^8\.'; then
+    msg_info "Installing .NET SDK 8.0"
+    if [[ "$(arch_resolve)" == "arm64" ]]; then
+      curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+      $STD bash /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/lib/dotnet8
+      ln -sf /usr/lib/dotnet8/dotnet /usr/bin/dotnet
+      rm -f /tmp/dotnet-install.sh
+    else
+      setup_deb822_repo \
+        "microsoft" \
+        "https://packages.microsoft.com/keys/microsoft-2025.asc" \
+        "https://packages.microsoft.com/debian/13/prod/" \
+        "trixie" \
+        "main"
+      $STD apt install -y dotnet-sdk-8.0
+    fi
+    msg_ok "Installed .NET SDK 8.0"
+  fi
+
   if check_for_gh_release "immichframe" "immichFrame/ImmichFrame"; then
     msg_info "Stopping Service"
     systemctl stop immichframe
     msg_ok "Stopped Service"
 
-    msg_info "Backing up Configuration"
-    cp -r /opt/immichframe/Config /tmp/immichframe_config.bak
-    msg_ok "Backed up Configuration"
+    create_backup /opt/immichframe/Config
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "immichframe" "immichFrame/ImmichFrame" "tarball" "latest" "/tmp/immichframe"
 
@@ -45,7 +64,7 @@ function update_script() {
     cd /tmp/immichframe
     $STD dotnet publish ImmichFrame.WebApi/ImmichFrame.WebApi.csproj \
       --configuration Release \
-      --runtime linux-x64 \
+      --runtime "$(arch_resolve "linux-x64" "linux-arm64")" \
       --self-contained false \
       --output /opt/immichframe
 
@@ -57,11 +76,8 @@ function update_script() {
     rm -rf /tmp/immichframe
     msg_ok "Setup ImmichFrame"
 
-    msg_info "Restoring Configuration"
-    cp -r /tmp/immichframe_config.bak/* /opt/immichframe/Config/
-    rm -rf /tmp/immichframe_config.bak
+    restore_backup
     chown -R immichframe:immichframe /opt/immichframe
-    msg_ok "Restored Configuration"
 
 
     msg_info "Starting Service"

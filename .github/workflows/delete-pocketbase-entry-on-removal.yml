@@ -17,7 +17,7 @@ jobs:
     runs-on: self-hosted
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -75,8 +75,8 @@ jobs:
       - name: Mark as deleted in PocketBase
         if: steps.slugs.outputs.count != '0'
         env:
-          POCKETBASE_URL: ${{ secrets.POCKETBASE_URL }}
-          POCKETBASE_COLLECTION: ${{ secrets.POCKETBASE_COLLECTION }}
+          POCKETBASE_URL: ${{ vars.POCKETBASE_URL }}
+          POCKETBASE_COLLECTION: ${{ vars.POCKETBASE_COLLECTION }}
           POCKETBASE_ADMIN_EMAIL: ${{ secrets.POCKETBASE_ADMIN_EMAIL }}
           POCKETBASE_ADMIN_PASSWORD: ${{ secrets.POCKETBASE_ADMIN_PASSWORD }}
         run: |
@@ -175,8 +175,8 @@ jobs:
       - name: Generate CT stubs for deleted scripts
         if: steps.slugs.outputs.count != '0'
         env:
-          POCKETBASE_URL: ${{ secrets.POCKETBASE_URL }}
-          POCKETBASE_COLLECTION: ${{ secrets.POCKETBASE_COLLECTION }}
+          POCKETBASE_URL: ${{ vars.POCKETBASE_URL }}
+          POCKETBASE_COLLECTION: ${{ vars.POCKETBASE_COLLECTION }}
           POCKETBASE_ADMIN_EMAIL: ${{ secrets.POCKETBASE_ADMIN_EMAIL }}
           POCKETBASE_ADMIN_PASSWORD: ${{ secrets.POCKETBASE_ADMIN_PASSWORD }}
         run: |
@@ -265,23 +265,23 @@ jobs:
                 : 'This script was removed and cannot be installed or updated.';
 
               const stubPath = path.join('ct', slug + '.sh');
-              const content =
-`#!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
-# Copyright (c) 2021-2026 community-scripts ORG
-# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
-
-APP="${appName.replace(/"/g, '\\"')}"
-
-header_info "$APP"
-variables
-color
-
-msg_error "This script is no longer available in community-scripts."
-msg_error "${deletedMessage.replace(/"/g, '\\"')}"
-msg_warn "More info: https://community-scripts.org/scripts/${slug}"
-exit 1
-`;
+              const content = [
+                "#!/usr/bin/env bash",
+                "source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)",
+                "# Copyright (c) 2021-2026 community-scripts ORG",
+                "# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE",
+                "",
+                `APP="${appName.replace(/"/g, '\\"')}"`,
+                "",
+                'header_info "$APP"',
+                'variables',
+                'color',
+                "",
+                'msg_error "This script is no longer available in community-scripts."',
+                `msg_error "${deletedMessage.replace(/"/g, '\\"')}"`,
+                `msg_warn "More info: https://community-scripts.org/scripts/${slug}"`,
+                "exit 1"
+              ].join('\n') + '\n';
               fs.writeFileSync(stubPath, content);
               console.log('Generated stub: ' + stubPath);
             }

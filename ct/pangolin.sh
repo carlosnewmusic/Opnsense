@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Slaviša Arežina (tremor021)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 # Source: https://pangolin.net/ | Github: https://github.com/fosrl/pangolin
 
 APP="Pangolin"
-PANGOLIN_VERSION="${PANGOLIN_VERSION:-1.18.4}"
+PANGOLIN_VERSION="${PANGOLIN_VERSION:-1.21.0}"
 var_tags="${var_tags:-proxy}"
 var_cpu="${var_cpu:-2}"
 var_ram="${var_ram:-4096}"
 var_disk="${var_disk:-10}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 var_tun="${var_tun:-1}"
+
+export var_pangolin_url="${var_pangolin_url:-}"
+export var_pangolin_email="${var_pangolin_email:-}"
 
 header_info "$APP"
 variables
@@ -33,6 +38,15 @@ function update_script() {
 
   ensure_dependencies build-essential python3
 
+  if ! command -v psql &>/dev/null; then
+    msg_error "This installation uses SQLite and cannot be upgraded to Pangolin ${PANGOLIN_VERSION}."
+    echo -e "${INFO}${YW}Starting with Pangolin 1.20.0, PostgreSQL is required as the database backend.${CL}"
+    echo -e "${INFO}${YW}An automatic migration of your existing SQLite data is not supported.${CL}"
+    echo -e "${INFO}${YW}Please create a new LXC with the Pangolin install script, which sets up PostgreSQL automatically.${CL}"
+    echo -e "${INFO}${YW}Your current data is preserved in this container and can be manually migrated if needed.${CL}"
+    exit 1
+  fi
+
   NODE_VERSION="24" setup_nodejs
 
   if check_for_gh_release "pangolin" "fosrl/pangolin" "$PANGOLIN_VERSION" "Pinned to a tested release because Pangolin's schema changes have repeatedly broken unattended updates. To try a newer version at your own risk, run: 'export PANGOLIN_VERSION=<tag>' and re-run update. If it breaks, please open an issue at https://github.com/community-scripts/ProxmoxVE/issues with the error log."; then
@@ -41,37 +55,30 @@ function update_script() {
     systemctl stop gerbil
     msg_info "Service stopped"
 
-    msg_info "Creating backup"
-    tar -czf /opt/pangolin_config_backup.tar.gz -C /opt/pangolin config
-    if [[ -f /opt/pangolin/config/db/db.sqlite ]]; then
-      cp -a /opt/pangolin/config/db/db.sqlite \
-        "/opt/pangolin/config/db/db.sqlite.pre-${PANGOLIN_VERSION}-$(date +%Y%m%d-%H%M%S).bak"
-    fi
-    msg_ok "Created backup"
+    DB_URL=$(sed -n 's/.*connection_string: "\(.*\)".*/\1/p' /opt/pangolin/config/config.yml)
+    create_backup /opt/pangolin/config
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "pangolin" "fosrl/pangolin" "tarball" "$PANGOLIN_VERSION"
-    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "gerbil" "fosrl/gerbil" "singlefile" "latest" "/usr/bin" "gerbil_linux_amd64"
+    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "gerbil" "fosrl/gerbil" "singlefile" "latest" "/usr/bin" "gerbil_linux_$(arch_resolve)"
 
     msg_info "Updating Pangolin"
     cd /opt/pangolin
-    $STD npm ci
-    $STD npm run set:sqlite
+    $STD npm ci --allow-remote=all
+    $STD npm run set:pg
     $STD npm run set:oss
     rm -rf server/private
-    $STD npm run db:generate
+    DATABASE_URL="$DB_URL" $STD npm run db:generate
     $STD npm run build
     $STD npm run build:cli
     cp -R .next/standalone ./
+    cp -r server/migrations ./dist/init
     chmod +x ./dist/cli.mjs
     cp server/db/names.json ./dist/names.json
     cp server/db/ios_models.json ./dist/ios_models.json
     cp server/db/mac_models.json ./dist/mac_models.json
     msg_ok "Updated Pangolin"
 
-    msg_info "Restoring config"
-    tar -xzf /opt/pangolin_config_backup.tar.gz -C /opt/pangolin --overwrite
-    rm -f /opt/pangolin_config_backup.tar.gz
-    msg_ok "Restored config"
+    restore_backup
 
     if ! grep -q '^ExecStartPre=/usr/bin/node dist/migrations.mjs' /etc/systemd/system/pangolin.service 2>/dev/null; then
       msg_info "Adding migration step to pangolin.service"
@@ -82,13 +89,8 @@ function update_script() {
 
     msg_info "Running database migrations"
     cd /opt/pangolin
-    SQLITE_DB="/opt/pangolin/config/db/db.sqlite"
-    if [[ -f "$SQLITE_DB" ]]; then
-      if ! sqlite3 "$SQLITE_DB" ".tables" 2>/dev/null | tr ' ' '\n' | grep -qx "statusHistory"; then
-        sqlite3 "$SQLITE_DB" "DELETE FROM versionMigrations;" 2>/dev/null || true
-      fi
-    fi
     ENVIRONMENT=prod $STD node dist/migrations.mjs
+
     msg_ok "Ran database migrations"
 
     msg_info "Updating Badger plugin version"
@@ -112,4 +114,4 @@ description
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
 echo -e "${INFO}${YW}Access it using the following URL:${CL}"
-echo -e "${GATEWAY}${BGN}https://<YOUR_PANGOLIN_URL>${CL}"
+echo -e "${GATEWAY}${BGN}https://<YOUR_PANGOLIN_URL> or http://${IP}:3002${CL}"

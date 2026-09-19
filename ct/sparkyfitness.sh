@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Tom Frenzel (tomfrenzel)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-2048}"
 var_disk="${var_disk:-7}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -30,22 +32,17 @@ function update_script() {
     exit
   fi
 
+  ensure_dependencies git
   if check_for_gh_release "sparkyfitness" "CodeWithCJ/SparkyFitness"; then
     msg_info "Stopping Services"
     systemctl stop sparkyfitness-server nginx
     msg_ok "Stopped Services"
 
-    msg_info "Backing up data"
-    mkdir -p /opt/sparkyfitness_backup
-    if [[ -d /opt/sparkyfitness/SparkyFitnessServer/uploads ]]; then
-      cp -r /opt/sparkyfitness/SparkyFitnessServer/uploads /opt/sparkyfitness_backup/
-    fi
-    if [[ -d /opt/sparkyfitness/SparkyFitnessServer/backup ]]; then
-      cp -r /opt/sparkyfitness/SparkyFitnessServer/backup /opt/sparkyfitness_backup/
-    fi
-    msg_ok "Backed up data"
+    create_backup /opt/sparkyfitness/SparkyFitnessServer/uploads /opt/sparkyfitness/SparkyFitnessServer/backup
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "sparkyfitness" "CodeWithCJ/SparkyFitness" "tarball"
+
+    restore_backup
 
     PNPM_VERSION="$(jq -r '.packageManager | split("@")[1]' /opt/sparkyfitness/package.json)"
     NODE_VERSION="25" NODE_MODULE="pnpm@${PNPM_VERSION}" setup_nodejs
@@ -64,10 +61,13 @@ function update_script() {
     msg_ok "Updated Sparky Fitness Frontend"
 
     msg_info "Refreshing Nginx Config"
+    FRONTEND_URL=$(grep -oP '^SPARKY_FITNESS_FRONTEND_URL=\K.*' /etc/sparkyfitness/.env)
     sed \
       -e 's|${SPARKY_FITNESS_SERVER_HOST}|127.0.0.1|g' \
       -e 's|${SPARKY_FITNESS_SERVER_PORT}|3010|g' \
+      -e "s|\${SPARKY_FITNESS_FRONTEND_URL}|${FRONTEND_URL}|g" \
       -e 's|${NGINX_LISTEN_PORT}|80|g' \
+      -e 's|${NGINX_RATE_LIMIT}|5r/s|g' \
       -e 's|${NGINX_ACCESS_LOG}|/var/log/nginx/sparkyfitness.access.log|g' \
       -e 's|${NGINX_ERROR_LOG}|/var/log/nginx/sparkyfitness.error.log|g' \
       -e 's|root /usr/share/nginx/html;|root /var/www/sparkyfitness;|g' \
@@ -96,13 +96,9 @@ EOF
     systemctl daemon-reload
     msg_ok "Refreshed SparkyFitness Service"
 
-    msg_info "Restoring data"
-    cp -r /opt/sparkyfitness_backup/. /opt/sparkyfitness/SparkyFitnessServer/
-    rm -rf /opt/sparkyfitness_backup
-    msg_ok "Restored data"
-
     msg_info "Starting Services"
-    $STD systemctl start sparkyfitness-server nginx
+    $STD systemctl start sparkyfitness-server
+    nginx_enable_site sparkyfitness
     msg_ok "Started Services"
     msg_ok "Updated successfully!"
   fi

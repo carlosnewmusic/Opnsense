@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-4096}"
 var_disk="${var_disk:-8}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -35,23 +37,15 @@ function update_script() {
     systemctl stop caddy
     msg_ok "Stopped Services"
 
-    msg_info "Backing up Data"
-    cp /opt/solidtime/.env /opt/solidtime.env.bak
-    cp -r /opt/solidtime/storage /opt/solidtime_storage_backup
-    msg_ok "Backed up Data"
+    create_backup /opt/solidtime/.env /opt/solidtime/storage
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "solidtime" "solidtime-io/solidtime" "tarball"
 
-    msg_info "Restoring Data"
-    cp /opt/solidtime.env.bak /opt/solidtime/.env
-    rm -f /opt/solidtime.env.bak
-    cp -r /opt/solidtime_storage_backup/. /opt/solidtime/storage
-    rm -rf /opt/solidtime_storage_backup
-    msg_ok "Restored Data"
+    restore_backup
 
     msg_info "Updating Application"
     cd /opt/solidtime
-    $STD composer install --no-dev --optimize-autoloader
+    COMPOSER_ALLOW_SUPERUSER=1 $STD composer install --no-dev --optimize-autoloader
     $STD npm install
     $STD npm run build
     $STD php artisan migrate --force

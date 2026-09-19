@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: vhsdream
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-2048}"
 var_disk="${var_disk:-8}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -36,8 +38,17 @@ function update_script() {
   if check_for_gh_release "shelfmark" "calibrain/shelfmark"; then
     msg_info "Stopping Service(s)"
     systemctl stop shelfmark
-    [[ -f /etc/systemd/system/chromium.service ]] && systemctl stop chromium
     msg_ok "Stopped Service(s)"
+
+    if [[ $(sed -n '/_BYPASS=/s/[^=]*=//p' /etc/shelfmark/.env) == "true" ]] &&
+      [[ $(sed -n '/BYPASSER=/s/[^=]*=//p' /etc/shelfmark/.env) == "false" ]]; then
+      msg_info "Updating internal bypasser configuration"
+      systemctl disable -q --now chromium 2>/dev/null || true
+      rm -f /etc/systemd/system/chromium.service
+      systemctl daemon-reload
+      sed -i '/DOCKERMODE=/s/false/true/' /etc/shelfmark/.env
+      msg_ok "Updated internal bypasser configuration"
+    fi
 
     [[ -f /etc/systemd/system/flaresolverr.service ]] && if check_for_gh_release "flaresolverr" "Flaresolverr/Flaresolverr"; then
       msg_info "Stopping FlareSolverr service"
@@ -52,11 +63,12 @@ function update_script() {
       msg_ok "Updated FlareSolverr"
     fi
 
-    cp /opt/shelfmark/start.sh /opt/start.sh.bak
+    create_backup /opt/shelfmark/start.sh
     if command -v chromedriver &>/dev/null; then
       $STD apt remove -y chromium-driver
     fi
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "shelfmark" "calibrain/shelfmark" "tarball" "latest" "/opt/shelfmark"
+    restore_backup
     RELEASE_VERSION=$(cat "$HOME/.shelfmark")
 
     msg_info "Updating Shelfmark"
@@ -74,12 +86,10 @@ function update_script() {
     else
       $STD uv sync --active --locked --no-default-groups
     fi
-    mv /opt/start.sh.bak /opt/shelfmark/start.sh
     msg_ok "Updated Shelfmark"
 
     msg_info "Starting Service(s)"
     systemctl start shelfmark
-    [[ -f /etc/systemd/system/chromium.service ]] && systemctl start chromium
     msg_ok "Started Service(s)"
     msg_ok "Updated successfully!"
   fi

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: vhsdream | MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
-# Source: https://rxresume.org | Github: https://github.com/amruthpillai/reactive-resume
+# Source: https://rxresu.me/ | Github: https://github.com/amruthpillai/reactive-resume
 
 APP="Reactive-Resume"
 var_tags="${var_tags:-documents}"
@@ -36,24 +38,24 @@ function update_script() {
 
     ensure_dependencies git
 
-    cp /opt/reactive-resume/.env /opt/reactive-resume.env.bak
-    NODE_VERSION="24" setup_nodejs
+    create_backup /opt/reactive-resume/.env
+    NODE_VERSION="24" NODE_MODULE="corepack" setup_nodejs
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "reactive-resume" "amruthpillai/reactive-resume" "tarball" "latest" "/opt/reactive-resume"
+
+    restore_backup
 
     msg_info "Updating Reactive Resume (Patience)"
     cd /opt/reactive-resume
     export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-    corepack enable
     corepack prepare --activate
     export CI="true"
     export NODE_ENV="production"
     $STD pnpm install --frozen-lockfile
     $STD pnpm run build
-    mv /opt/reactive-resume.env.bak /opt/reactive-resume/.env
     msg_ok "Updated Reactive Resume"
 
     msg_info "Updating Service"
-    sed -i 's|WorkingDirectory=/opt/reactive-resume/apps/web|WorkingDirectory=/opt/reactive-resume/apps/server|; s|ExecStart=/usr/bin/node .output/server/index.mjs|ExecStart=/usr/bin/node dist/index.mjs|' /etc/systemd/system/reactive-resume.service
+    sed -i -E 's|^WorkingDirectory=/opt/reactive-resume(/.*)?$|WorkingDirectory=/opt/reactive-resume/apps/server|; s|ExecStart=/usr/bin/node .output/server/index.mjs|ExecStart=/usr/bin/node dist/index.mjs|' /etc/systemd/system/reactive-resume.service
     systemctl daemon-reload
     msg_ok "Updated Service"
 

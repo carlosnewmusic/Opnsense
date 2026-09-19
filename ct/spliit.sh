@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: phof
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -35,16 +37,12 @@ function update_script() {
     systemctl stop spliit
     msg_ok "Stopped Service"
 
-    msg_info "Backing up Configuration"
-    rm -f /opt/spliit.env.bak
-    cp /opt/spliit/.env /opt/spliit.env.bak
-    msg_ok "Backed up Configuration"
+    create_backup /opt/spliit/.env
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "spliit" "spliit-app/spliit" "tarball"
 
-    msg_info "Restoring Configuration"
-    cp /opt/spliit.env.bak /opt/spliit/.env
-    msg_ok "Restored Configuration"
+    restore_backup
+    NODE_VERSION="26" setup_nodejs
 
     msg_info "Building Application"
     cd /opt/spliit
@@ -72,5 +70,5 @@ description
 
 msg_ok "Completed Successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
-echo -e "${INFO}${YW} Access it using the following URL:${CL}"
-echo -e "${TAB}${GATEWAY}${BGN}http://${IP}:3000${CL}"
+echo -e "${INFO}${YW}Access it using the following URL:${CL}"
+echo -e "${GATEWAY}${BGN}http://${IP}:3000${CL}"

@@ -49,6 +49,10 @@ echo ""
 
 read -r -p "${TAB3}Select deployment type [1]: " DEPLOYMENT_TYPE
 DEPLOYMENT_TYPE="${DEPLOYMENT_TYPE:-1}"
+if [[ "$(arch_resolve)" == "arm64" && "$DEPLOYMENT_TYPE" == "2" ]]; then
+  msg_warn "FlareSolverr has no arm64 build; using Shelfmark's internal bypasser instead"
+  DEPLOYMENT_TYPE="1"
+fi
 
 case "$DEPLOYMENT_TYPE" in
 1)
@@ -112,6 +116,7 @@ else
     chromium-common \
     chromium \
     python3-tk
+  sed -i '/DOCKERMODE=/s/false/true/' /etc/shelfmark/.env
   msg_ok "Installed internal bypasser dependencies"
 fi
 
@@ -161,22 +166,6 @@ KillMode=mixed
 WantedBy=multi-user.target
 EOF
 
-if [[ "$DEPLOYMENT_TYPE" == "1" ]]; then
-  cat <<EOF >/etc/systemd/system/chromium.service
-[Unit]
-Description=Chromium Headless Browser
-After=network.target
-
-[Service]
-User=root
-ExecStart=/usr/bin/chromium --headless --no-sandbox --disable-gpu --disable-dev-shm-usage --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --hide-scrollbars
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl enable -q --now chromium
-fi
 if [[ "$DEPLOYMENT_TYPE" == "2" ]]; then
   cat <<EOF >/etc/systemd/system/flaresolverr.service
 [Unit]

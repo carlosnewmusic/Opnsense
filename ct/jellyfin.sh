@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 tteck
 # Author: tteck (tteckster)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-2048}"
 var_disk="${var_disk:-16}"
 var_os="${var_os:-ubuntu}"
 var_version="${var_version:-24.04}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 var_gpu="${var_gpu:-yes}"
 
@@ -30,7 +32,7 @@ function update_script() {
     exit
   fi
 
-  if ! grep -qEi 'ubuntu' /etc/os-release; then
+  if ! grep -qEi 'ubuntu' /etc/os-release && [[ "$(arch_resolve)" == "amd64" ]]; then
     msg_info "Updating Intel Dependencies"
     rm -f ~/.intel-* || true
 
@@ -47,20 +49,22 @@ function update_script() {
   fi
 
   msg_info "Setting up Jellyfin Repository"
+  JELLYFIN_REPO_URL="https://repo.jellyfin.org/$(get_os_info id)"
+  JELLYFIN_SUITE="$(get_fallback_suite "$(get_os_info id)" "$(get_os_info codename)" "$JELLYFIN_REPO_URL")"
   setup_deb822_repo \
     "jellyfin" \
     "https://repo.jellyfin.org/jellyfin_team.gpg.key" \
-    "https://repo.jellyfin.org/$(get_os_info id)" \
-    "$(get_os_info codename)"
+    "$JELLYFIN_REPO_URL" \
+    "$JELLYFIN_SUITE"
   msg_ok "Set up Jellyfin Repository"
 
   msg_info "Updating Jellyfin"
   ensure_dependencies libjemalloc2
   if [[ ! -f /usr/lib/libjemalloc.so ]]; then
-    ln -sf /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 /usr/lib/libjemalloc.so
+    ln -sf "/usr/lib/$(arch_resolve "x86_64-linux-gnu" "aarch64-linux-gnu")/libjemalloc.so.2" /usr/lib/libjemalloc.so
   fi
   $STD apt -y upgrade
-  $STD apt -y --with-new-pkgs upgrade jellyfin jellyfin-server jellyfin-ffmpeg7
+  $STD apt -y --with-new-pkgs upgrade jellyfin jellyfin-server jellyfin-ffmpeg8
   ln -sf /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/bin/ffmpeg
   ln -sf /usr/lib/jellyfin-ffmpeg/ffprobe /usr/bin/ffprobe
   msg_ok "Updated Jellyfin"

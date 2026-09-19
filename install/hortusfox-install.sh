@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Copyright (c) 2021-2026 community-scripts ORG
-# Author: MickLesk (CanbiZ)
+# Author: MickLesk (CanbiZ) | Co-Author: Tom Frenzel (tomfrenzel)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 # Source: https://github.com/danielbrendel/hortusfox-web
 
@@ -36,22 +36,25 @@ msg_ok "Composer dependencies installed"
 
 msg_info "Running DB migration"
 $STD php asatru migrate:fresh
+HORTUSFOX_VERSION="$(<~/.hortusfox)"
+printf '["%s"]\n' "$HORTUSFOX_VERSION" >/opt/hortusfox/app/migrations/verhist.json
 msg_ok "Migration finished"
 
 msg_info "Setting up HortusFox"
 $STD mariadb -u root -D $MARIADB_DB_NAME -e "INSERT IGNORE INTO AppModel (workspace, language, created_at) VALUES ('Default Workspace', 'en', NOW());"
-$STD php asatru plants:attributes
 $STD php asatru calendar:classes
+$STD php asatru plants:attributes
+$STD php asatru aquashell:config
 ADMIN_EMAIL="admin@example.com"
 ADMIN_PASS="$(openssl rand -base64 18 | tr -dc 'a-zA-Z0-9' | head -c13)"
 ADMIN_HASH=$(php -r "echo password_hash('$ADMIN_PASS', PASSWORD_BCRYPT);")
 $STD mariadb -u root -D $MARIADB_DB_NAME -e "INSERT IGNORE INTO UserModel (name, email, password, admin) VALUES ('Admin', '$ADMIN_EMAIL', '$ADMIN_HASH', 1);"
-{
-  echo ""
-  echo "HortusFox-Admin-Creds:"
-  echo "E-Mail: $ADMIN_EMAIL"
-  echo "Passwort: $ADMIN_PASS"
-} >>~/hortusfox.creds
+cat <<EOF >~/hortusfox.creds
+
+HortusFox-Admin-Creds:
+E-Mail: $ADMIN_EMAIL
+Passwort: $ADMIN_PASS
+EOF
 $STD mariadb -u root -D $MARIADB_DB_NAME -e "INSERT IGNORE INTO LocationsModel (name, active, created_at) VALUES ('Home', 1, NOW());"
 msg_ok "Set up HortusFox"
 

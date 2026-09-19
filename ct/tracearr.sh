@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: durzo
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-8192}"
 var_disk="${var_disk:-10}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -122,7 +124,7 @@ EOF
     $STD pnpm turbo telemetry disable
     $STD pnpm turbo run build --no-daemon --filter=@tracearr/shared --filter=@tracearr/server --filter=@tracearr/web
     rm -rf /opt/tracearr
-    mkdir -p /opt/tracearr/{packages/shared,apps/server,apps/web,apps/server/src/db}
+    mkdir -p /opt/tracearr/{packages/shared,packages/emails,apps/server,apps/web,apps/server/src/db}
     cp -rf package.json /opt/tracearr/
     cp -rf pnpm-workspace.yaml /opt/tracearr/
     cp -rf pnpm-lock.yaml /opt/tracearr/
@@ -132,6 +134,8 @@ EOF
     cp -rf apps/web/dist /opt/tracearr/apps/web/dist
     cp -rf packages/shared/package.json /opt/tracearr/packages/shared/
     cp -rf packages/shared/dist /opt/tracearr/packages/shared/dist
+    cp -rf packages/emails/package.json /opt/tracearr/packages/emails/
+    cp -rf packages/emails/dist /opt/tracearr/packages/emails/dist
     cp -rf apps/server/src/db/migrations /opt/tracearr/apps/server/src/db/migrations
     cp -rf data /opt/tracearr/data
     mkdir -p /opt/tracearr/data/image-cache

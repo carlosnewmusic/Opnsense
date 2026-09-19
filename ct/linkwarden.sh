@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -28,20 +30,18 @@ function update_script() {
     exit
   fi
   if check_for_gh_release "linkwarden" "linkwarden/linkwarden"; then
-    NODE_VERSION="22" NODE_MODULE="yarn@latest" setup_nodejs
+    NODE_VERSION="22" NODE_MODULE="corepack,yarn@latest" setup_nodejs
     msg_info "Stopping Service"
     systemctl stop linkwarden
     msg_ok "Stopped Service"
 
     RUST_CRATES="monolith" setup_rust
 
-    msg_info "Backing up data"
-    mv /opt/linkwarden/.env /opt/.env
-    [ -d /opt/linkwarden/data ] && mv /opt/linkwarden/data /opt/data.bak
-    rm -rf /opt/linkwarden
-    msg_ok "Backed up data"
+    create_backup /opt/linkwarden/.env /opt/linkwarden/data
 
-    fetch_and_deploy_gh_release "linkwarden" "linkwarden/linkwarden" "tarball"
+    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "linkwarden" "linkwarden/linkwarden" "tarball"
+
+    restore_backup
 
     msg_info "Updating Linkwarden"
     cd /opt/linkwarden
@@ -54,17 +54,15 @@ function update_script() {
       fi
     fi
     if command -v corepack >/dev/null 2>&1; then
-      $STD corepack enable
+
       $STD corepack prepare "yarn@${yarn_ver}" --activate || true
     fi
     $STD yarn
     $STD npx playwright install-deps
     $STD npx playwright install
-    mv /opt/.env /opt/linkwarden/.env
     $STD yarn prisma:generate
     $STD yarn web:build
     $STD yarn prisma:deploy
-    [ -d /opt/data.bak ] && mv /opt/data.bak /opt/linkwarden/data
     rm -rf ~/.cargo/registry ~/.cargo/git ~/.cargo/.package-cache
     rm -rf /root/.cache/yarn
     rm -rf /opt/linkwarden/.next/cache

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-2048}"
 var_disk="${var_disk:-8}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -37,12 +39,11 @@ function update_script() {
     systemctl stop soulsync
     msg_ok "Stopped Service"
 
-    msg_info "Backing up Data"
-    mv /opt/soulsync/config /opt/soulsync-config.bak
-    mv /opt/soulsync/data /opt/soulsync-data.bak
-    msg_ok "Backed up Data"
+    create_backup /opt/soulsync/config /opt/soulsync/data
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "soulsync" "Nezreka/SoulSync" "tarball"
+
+    restore_backup
 
     msg_info "Updating Python Dependencies"
     cd /opt/soulsync
@@ -55,9 +56,6 @@ function update_script() {
     $STD npm ci
     $STD npm run build
     msg_ok "Built WebUI"
-
-    mv /opt/soulsync-config.bak /opt/soulsync/config
-    mv /opt/soulsync-data.bak /opt/soulsync/data
 
     msg_info "Starting Service"
     systemctl start soulsync

@@ -22,7 +22,7 @@ msg_ok "Installed Dependencies"
 
 PG_VERSION="16" PG_MODULES="pgvector" setup_postgresql
 PG_DB_NAME="bookorbit" PG_DB_USER="bookorbit" PG_DB_EXTENSIONS="uuid-ossp,pg_trgm,vector" setup_postgresql_db
-NODE_VERSION="24" setup_nodejs
+NODE_VERSION="24" NODE_MODULE="corepack" setup_nodejs
 setup_uv
 
 fetch_and_deploy_gh_release "bookorbit" "bookorbit/bookorbit" "tarball"
@@ -30,7 +30,7 @@ fetch_and_deploy_gh_release "bookorbit" "bookorbit/bookorbit" "tarball"
 msg_info "Building Application"
 cd /opt/bookorbit
 PNPM_VERSION=$(jq -r '.packageManager | ltrimstr("pnpm@")' /opt/bookorbit/package.json)
-$STD corepack enable
+
 $STD corepack prepare "pnpm@${PNPM_VERSION}" --activate
 $STD pnpm install --frozen-lockfile
 $STD pnpm --filter client run build-only
@@ -51,7 +51,7 @@ mkdir -p /opt/bookorbit-data/covers /opt/bookorbit-data/book-bucket /opt/bookorb
 APP_VER=$(cat ~/.bookorbit)
 JWT_SECRET=$(openssl rand -hex 32)
 SETUP_BOOTSTRAP_TOKEN=$(openssl rand -hex 16)
-cat <<EOF >>~/bookorbit.creds
+cat <<EOF >~/bookorbit.creds
 
 Setup Token: ${SETUP_BOOTSTRAP_TOKEN}
 EOF
@@ -81,6 +81,7 @@ Requires=postgresql.service
 [Service]
 Type=simple
 User=root
+TimeoutStartSec=infinity
 WorkingDirectory=/opt/bookorbit/server
 EnvironmentFile=/opt/bookorbit/.env
 ExecStartPre=/usr/bin/node /opt/bookorbit/server/dist/scripts/migrate.js

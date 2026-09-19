@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Stephen Chin (steveonjava)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-4096}"
 var_disk="${var_disk:-20}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -50,6 +52,16 @@ function update_script() {
     set -a; source /etc/default/hermes; set +a
     /home/hermes/.local/bin/hermes update --yes
   '
+  # See https://github.com/community-scripts/ProxmoxVE/issues/17123
+  mapfile -t root_gateway_pids < <(ps -eo user=,pid=,args= | awk '$1 == "root" && $0 ~ /\/home\/hermes\/\.hermes\/hermes-agent\/venv\/bin\/python -m hermes_cli\.main gateway run --replace$/ { print $2 }')
+  if ((${#root_gateway_pids[@]})); then
+    kill -TERM "${root_gateway_pids[@]}"
+    for pid in "${root_gateway_pids[@]}"; do
+      while kill -0 "$pid" 2>/dev/null; do
+        sleep 0.1
+      done
+    done
+  fi
   chown -R hermes:hermes /home/hermes
   msg_ok "Updated Hermes Agent"
 

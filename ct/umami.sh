@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 tteck
 # Author: tteck (tteckster)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -34,9 +36,9 @@ function update_script() {
     systemctl stop umami
     msg_ok "Stopped Service"
 
-    mv /opt/umami/.env /opt/.env.bak
+    create_backup /opt/umami/.env
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "umami" "umami-software/umami" "tarball"
-    mv /opt/.env.bak /opt/umami/.env
+    restore_backup
 
     msg_info "Updating Umami"
     cd /opt/umami

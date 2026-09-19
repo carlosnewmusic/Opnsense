@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-4096}"
 var_disk="${var_disk:-20}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -31,7 +33,7 @@ function update_script() {
   fi
 
   PYTHON_VERSION="3.12" setup_uv
-  NODE_VERSION="22" setup_nodejs
+  NODE_VERSION="22" NODE_MODULE="corepack" setup_nodejs
 
   if check_for_gh_release "gramps-web-api" "gramps-project/gramps-web-api"; then
     msg_info "Stopping Service"
@@ -84,9 +86,14 @@ function update_script() {
     msg_info "Updating Gramps Web Frontend"
     cd /opt/gramps-web/frontend
     export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-    $STD corepack enable
+
+    create_backup /opt/gramps-web/frontend/dist/config.js
+
     $STD npm install
     $STD npm run build
+
+    restore_backup
+
     msg_ok "Updated Gramps Web Frontend"
 
     msg_info "Starting Service"

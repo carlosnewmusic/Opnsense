@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Slaviša Arežina (tremor021)
@@ -13,7 +15,7 @@ var_ram="${var_ram:-1024}"
 var_disk="${var_disk:-4}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -30,28 +32,35 @@ function update_script() {
     exit
   fi
 
+  if [[ -f /opt/poweradmin/powerdns.db ]]; then
+    msg_info "Moving PowerDNS database out of the web root"
+    systemctl stop pdns apache2
+    mkdir -p /var/lib/powerdns
+    mv /opt/poweradmin/powerdns.db /var/lib/powerdns/powerdns.db
+    sed -i 's#/opt/poweradmin/powerdns.db#/var/lib/powerdns/powerdns.db#' \
+      /etc/powerdns/pdns.d/gsqlite3.conf /opt/poweradmin/config/settings.php
+    chown pdns:pdns /var/lib/powerdns/powerdns.db
+    chmod 664 /var/lib/powerdns/powerdns.db
+    systemctl start pdns apache2
+    msg_ok "Moved PowerDNS database out of the web root"
+  fi
+
   msg_info "Updating PowerDNS"
   $STD apt update
   $STD apt install -y --only-upgrade pdns-server pdns-backend-sqlite3
   msg_ok "Updated PowerDNS"
 
   if check_for_gh_release "poweradmin" "poweradmin/poweradmin"; then
-    msg_info "Backing up Configuration"
-    cp /opt/poweradmin/config/settings.php /opt/poweradmin_settings.php.bak
-    cp /opt/poweradmin/powerdns.db /opt/poweradmin_powerdns.db.bak
-    msg_ok "Backed up Configuration"
+    create_backup /opt/poweradmin/config/settings.php
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "poweradmin" "poweradmin/poweradmin" "tarball"
 
+    restore_backup
+
     msg_info "Updating Poweradmin"
-    cp /opt/poweradmin_settings.php.bak /opt/poweradmin/config/settings.php
-    cp /opt/poweradmin_powerdns.db.bak /opt/poweradmin/powerdns.db
     rm -rf /opt/poweradmin/install
-    rm -f /opt/poweradmin_settings.php.bak /opt/poweradmin_powerdns.db.bak
     chown -R www-data:pdns /opt/poweradmin
     chmod 775 /opt/poweradmin
-    chown pdns:pdns /opt/poweradmin/powerdns.db
-    chmod 664 /opt/poweradmin/powerdns.db
     msg_ok "Updated Poweradmin"
 
     msg_info "Restarting Services"

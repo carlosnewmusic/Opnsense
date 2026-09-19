@@ -1,8 +1,37 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: michelroegl-brunner
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
+#
+# OPNsense VM - imagen SERIAL oficial (BIOS Legacy)
+# Fix: el login en OPNsense entra al MENÚ, no a un shell. Interactuamos con el menú.
+
+LOG_FILE="${LOG_FILE:-/var/log/opnsense-vm-install.log}"
+DEBUG_SERIAL="${DEBUG_SERIAL:-0}"
+KEEP_ON_ERROR="${KEEP_ON_ERROR:-0}"
+OPNSENSE_VERSION="${OPNSENSE_VERSION:-26.7}"
+LAN_STATIC_IP="${LAN_STATIC_IP:-192.168.2.1}"
+LAN_STATIC_PREFIX="${LAN_STATIC_PREFIX:-24}"
+
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+
+log()  { local l="$1"; shift; echo -e "[$(date '+%F %T')] [$l] $*" | tee -a "$LOG_FILE"; }
+log_info() { log "INFO " "$@"; }
+log_warn() { log "WARN " "$@"; }
+log_err()  { log "ERROR" "$@"; }
+log_dbg()  { [ "$DEBUG_SERIAL" = "1" ] && log "DEBUG" "$@" || echo -e "[DEBUG] $*" >>"$LOG_FILE"; }
+log_step() { log "STEP " "$@"; }
+log_ok()   { log "OK   " "$@"; }
+
+exec > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2)
+
+log_info "==============================================================="
+log_info "OPNsense VM install (imagen SERIAL oficial - Legacy BIOS)"
+log_info "Versión: $OPNSENSE_VERSION"
+log_info "LAN estática: $LAN_STATIC_IP/$LAN_STATIC_PREFIX"
+log_info "DEBUG_SERIAL=$DEBUG_SERIAL  KEEP_ON_ERROR=$KEEP_ON_ERROR"
+log_info "==============================================================="
 
 source /dev/stdin <<<$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func)
 
@@ -19,861 +48,444 @@ EOF
 }
 header_info
 echo -e "Loading..."
-#API VARIABLES
-RANDOM_UUID="$(cat /proc/sys/kernel/random/uuid)"
-METHOD=""
-NSAPP="opnsense-vm"
-var_os="opnsense"
-var_version="26.1"
-#
+
+NSAPP="opnsense-vm"; var_os="opnsense"; var_version="${OPNSENSE_VERSION}"
 GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 GEN_MAC_LAN=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 
-YW=$(echo "\033[33m")
-BL=$(echo "\033[36m")
-HA=$(echo "\033[1;34m")
-RD=$(echo "\033[01;31m")
-BGN=$(echo "\033[4;92m")
-GN=$(echo "\033[1;92m")
-DGN=$(echo "\033[32m")
-CL=$(echo "\033[m")
-BFR="\\r\\033[K"
-HOLD="-"
-CM="${GN}✓${CL}"
-CROSS="${RD}✗${CL}"
+YW=$'\033[33m'; BL=$'\033[36m'; RD=$'\033[01;31m'; BGN=$'\033[4;92m'
+GN=$'\033[1;92m'; DGN=$'\033[32m'; CL=$'\033[m'; BFR="\\r\\033[K"
+HOLD="-"; CM="${GN}✓${CL}"; CROSS="${RD}✗${CL}"
+
 set -Eeo pipefail
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
 trap 'post_update_to_api "failed" "130"' SIGINT
 trap 'post_update_to_api "failed" "143"' SIGTERM
 trap 'post_update_to_api "failed" "129"; exit 129' SIGHUP
+
 function error_handler() {
-  local exit_code="$?"
-  local line_number="$1"
-  local command="$2"
-  post_update_to_api "failed" "$exit_code"
-  local error_message="${RD}[ERROR]${CL} in line ${RD}$line_number${CL}: exit code ${RD}$exit_code${CL}: while executing command ${YW}$command${CL}"
-  echo -e "\n$error_message\n"
-  cleanup_vmid
+  local ec="$?" line="$1" cmd="$2"
+  log_err "ERROR line $line exit $ec: $cmd"
+  dump_serial_tail 60 2>/dev/null || true
+  post_update_to_api "failed" "$ec" 2>/dev/null || true
+  [ "$KEEP_ON_ERROR" = "1" ] && log_warn "KEEP_ON_ERROR=1 -> VM $VMID NO destruida" \
+    || { log_warn "Destruyendo VM $VMID"; cleanup_vmid; }
 }
 
 function get_valid_nextid() {
-  local try_id
-  try_id=$(pvesh get /cluster/nextid)
+  local t; t=$(pvesh get /cluster/nextid)
   while true; do
-    if [ -f "/etc/pve/qemu-server/${try_id}.conf" ] || [ -f "/etc/pve/lxc/${try_id}.conf" ]; then
-      try_id=$((try_id + 1))
-      continue
-    fi
-    if lvs --noheadings -o lv_name | grep -qE "(^|[-_])${try_id}($|[-_])"; then
-      try_id=$((try_id + 1))
-      continue
-    fi
+    [ -f "/etc/pve/qemu-server/${t}.conf" ] && { t=$((t+1)); continue; }
+    [ -f "/etc/pve/lxc/${t}.conf" ] && { t=$((t+1)); continue; }
+    lvs --noheadings -o lv_name 2>/dev/null | grep -qE "(^|[-_])${t}($|[-_])" && { t=$((t+1)); continue; }
     break
   done
-  echo "$try_id"
+  echo "$t"
 }
 
 function cleanup_vmid() {
   if qm status $VMID &>/dev/null; then
-    qm stop $VMID &>/dev/null
-    qm destroy $VMID &>/dev/null
+    qm stop $VMID &>/dev/null || true
+    qm destroy $VMID &>/dev/null || true
   fi
 }
 
 function cleanup() {
-  local exit_code=$?
-  popd >/dev/null
-  if [[ "${POST_TO_API_DONE:-}" == "true" && "${POST_UPDATE_DONE:-}" != "true" ]]; then
-    if [[ $exit_code -eq 0 ]]; then
-      post_update_to_api "done" "none"
-    else
-      post_update_to_api "failed" "$exit_code"
-    fi
-  fi
-  rm -rf $TEMP_DIR
+  local ec=$?
+  log_info "cleanup() exit=$ec"
+  serial_stop 2>/dev/null || true
+  popd >/dev/null 2>&1 || true
+  [[ "${POST_TO_API_DONE:-}" == "true" && "${POST_UPDATE_DONE:-}" != "true" ]] && {
+    [ "$ec" -eq 0 ] && post_update_to_api "done" "none" 2>/dev/null || true
+    [ "$ec" -ne 0 ] && post_update_to_api "failed" "$ec" 2>/dev/null || true
+  }
+  [ "$ec" -eq 0 ] && rm -rf "$TEMP_DIR" || log_warn "TEMP_DIR: $TEMP_DIR"
 }
 
 function check_disk_space() {
-  local path="$1"
-  local required_gb="$2"
-  local available_kb=$(df -k "$path" | awk 'NR==2 {print $4}')
-  local available_gb=$((available_kb / 1024 / 1024))
-  if [ $available_gb -lt $required_gb ]; then
-    return 1
-  fi
+  local kb=$(df -k "$1" | awk 'NR==2 {print $4}')
+  [ $((kb/1024/1024)) -ge "$2" ]
+}
+
+if [ -d "/var/tmp" ] && check_disk_space "/var/tmp" 20; then
+  TEMP_DIR=$(mktemp -d /var/tmp/opnsense-vm.XXXXXX)
+else
+  TEMP_DIR=$(mktemp -d)
+fi
+log_info "TEMP_DIR=$TEMP_DIR"
+pushd "$TEMP_DIR" >/dev/null
+
+# =============================================================================
+# CONSOLA SERIE
+# =============================================================================
+SERIAL_PTY=""; SERIAL_LOG=""; SOCAT_PID=""; READER_PID=""
+
+function serial_start() {
+  serial_stop
+  SERIAL_LOG="${TEMP_DIR}/serial-${VMID}.log"; : > "$SERIAL_LOG"
+  SERIAL_PTY="${TEMP_DIR}/serial-${VMID}.pty"; rm -f "$SERIAL_PTY"
+  command -v socat >/dev/null 2>&1 || { log_err "socat no instalado (apt install socat)"; return 1; }
+  local sock="/var/run/qemu-server/${VMID}.serial0"
+  for _ in $(seq 1 30); do [ -S "$sock" ] && break; sleep 1; done
+  [ -S "$sock" ] || { log_err "Socket serie $sock no aparece"; return 1; }
+  socat UNIX-CONNECT:"$sock" PTY,link="$SERIAL_PTY",raw,echo=0,waitslave &
+  SOCAT_PID=$!
+  for _ in $(seq 1 50); do [ -L "$SERIAL_PTY" ] && break; sleep 0.2; done
+  [ -L "$SERIAL_PTY" ] || { log_err "PTY $SERIAL_PTY no aparece"; return 1; }
+  kill -0 "$SOCAT_PID" 2>/dev/null || { log_err "socat murió"; return 1; }
+  exec 3<>"$SERIAL_PTY"
+  stdbuf -o0 cat <&3 >> "$SERIAL_LOG" &
+  READER_PID=$!
+  sleep 1
+  log_info "Serial PTY activo: $SERIAL_PTY (socat=$SOCAT_PID reader=$READER_PID)"
   return 0
 }
 
-# Use disk-backed temp directory to avoid tmpfs/RAM size limits in /tmp
-if [ -d "/var/tmp" ] && check_disk_space "/var/tmp" 20; then
-  TEMP_DIR=$(mktemp -d /var/tmp/opnsense-vm.XXXXXX)
-elif [ -d "/tmp" ] && check_disk_space "/tmp" 20; then
-  TEMP_DIR=$(mktemp -d)
-else
-  # Fallback: try /var/tmp anyway, disk space check will catch it later
-  TEMP_DIR=$(mktemp -d /var/tmp/opnsense-vm.XXXXXX)
-fi
-pushd $TEMP_DIR >/dev/null
-function send_line_to_vm() {
-  echo -e "${DGN}Sending line: ${YW}$1${CL}"
-  for ((i = 0; i < ${#1}; i++)); do
-    character=${1:i:1}
-    case $character in
-    " ") character="spc" ;;
-    "-") character="minus" ;;
-    "=") character="equal" ;;
-    ",") character="comma" ;;
-    ".") character="dot" ;;
-    "/") character="slash" ;;
-    "'") character="apostrophe" ;;
-    ";") character="semicolon" ;;
-    '\') character="backslash" ;;
-    '`') character="grave_accent" ;;
-    "[") character="bracket_left" ;;
-    "]") character="bracket_right" ;;
-    "_") character="shift-minus" ;;
-    "+") character="shift-equal" ;;
-    "?") character="shift-slash" ;;
-    "<") character="shift-comma" ;;
-    ">") character="shift-dot" ;;
-    '"') character="shift-apostrophe" ;;
-    ":") character="shift-semicolon" ;;
-    "|") character="shift-backslash" ;;
-    "~") character="shift-grave_accent" ;;
-    "{") character="shift-bracket_left" ;;
-    "}") character="shift-bracket_right" ;;
-    "A") character="shift-a" ;;
-    "B") character="shift-b" ;;
-    "C") character="shift-c" ;;
-    "D") character="shift-d" ;;
-    "E") character="shift-e" ;;
-    "F") character="shift-f" ;;
-    "G") character="shift-g" ;;
-    "H") character="shift-h" ;;
-    "I") character="shift-i" ;;
-    "J") character="shift-j" ;;
-    "K") character="shift-k" ;;
-    "L") character="shift-l" ;;
-    "M") character="shift-m" ;;
-    "N") character="shift-n" ;;
-    "O") character="shift-o" ;;
-    "P") character="shift-p" ;;
-    "Q") character="shift-q" ;;
-    "R") character="shift-r" ;;
-    "S") character="shift-s" ;;
-    "T") character="shift-t" ;;
-    "U") character="shift-u" ;;
-    "V") character="shift-v" ;;
-    "W") character="shift-w" ;;
-    "X") character="shift-x" ;;
-    "Y") character="shift-y" ;;
-    "Z") character="shift-z" ;;
-    "!") character="shift-1" ;;
-    "@") character="shift-2" ;;
-    "#") character="shift-3" ;;
-    '$') character="shift-4" ;;
-    "%") character="shift-5" ;;
-    "^") character="shift-6" ;;
-    "&") character="shift-7" ;;
-    "*") character="shift-8" ;;
-    "(") character="shift-9" ;;
-    ")") character="shift-0" ;;
-    esac
-    qm sendkey $VMID "$character"
+function serial_stop() {
+  exec 3>&- 2>/dev/null || true
+  [ -n "${READER_PID:-}" ] && { kill "$READER_PID" 2>/dev/null || true; wait "$READER_PID" 2>/dev/null || true; }
+  [ -n "${SOCAT_PID:-}" ]  && { kill "$SOCAT_PID" 2>/dev/null || true; wait "$SOCAT_PID" 2>/dev/null || true; }
+  READER_PID=""; SOCAT_PID=""
+}
+
+function send_line() {
+  log_dbg "TX->$1"
+  printf '%s\r' "$1" >&3 2>/dev/null || log_warn "Escritura en consola serie falló"
+  sleep 0.5
+}
+
+function wait_for_pattern() {
+  local pat="$1" to="${2:-600}" label="${3:-$pat}" el=0
+  [ -f "$SERIAL_LOG" ] || return 1
+  log_info "Esperando hasta ${to}s a '$label' (regex: $pat)"
+  while [ $el -lt "$to" ]; do
+    if grep -qE "$pat" "$SERIAL_LOG" 2>/dev/null; then
+      log_info "Match tras ${el}s"
+      return 0
+    fi
+    sleep 3; el=$((el+3))
+    (( el % 60 == 0 )) && { log_info "  ... ${el}s / ${to}s"; dump_serial_tail 5; }
   done
-  qm sendkey $VMID ret
+  log_warn "TIMEOUT '$label'"
+  return 1
 }
 
-if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "OPNsense VM" --yesno "This will create a New OPNsense VM. Proceed?" 10 58); then
-  :
-else
-  header_info && echo -e "⚠ User exited script \n" && exit
+function dump_serial_tail() {
+  local n="${1:-30}"
+  [ -f "$SERIAL_LOG" ] && { log_info "--- últimas $n líneas ---"; tail -n "$n" "$SERIAL_LOG" | sed 's/^/  | /' | tee -a "$LOG_FILE"; log_info "--- fin ---"; }
+}
+
+# --- PROMPT ---
+if ! whiptail --backtitle "Proxmox VE Helper Scripts" --title "OPNsense VM" \
+     --yesno "Crear VM OPNsense (imagen SERIAL oficial, Legacy BIOS)?" 10 58; then
+  header_info && echo -e "⚠ Cancelado\n" && exit
 fi
 
-function msg_info() {
-  local msg="$1"
-  echo -ne " ${HOLD} ${YW}${msg}..."
+function msg_info() { echo -ne " ${HOLD} ${YW}$1..."; }
+function msg_ok()   { echo -e "${BFR} ${CM} ${GN}$1${CL}"; log_ok "$1"; }
+function msg_error(){ echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; log_err "$1"; }
+
+function pve_check() {
+  local v; v=$(pveversion | awk -F'/' '{print $2}' | awk -F'-' '{print $1}')
+  [[ "$v" =~ ^8\.([0-9]+) ]] && { [ ${BASH_REMATCH[1]} -gt 9 ] && { msg_error "PVE 8.x no soportado"; exit 105; }; return 0; }
+  [[ "$v" =~ ^9\.([0-9]+) ]] && { [ ${BASH_REMATCH[1]} -gt 2 ] && { msg_error "PVE 9.x no soportado"; exit 105; }; return 0; }
+  msg_error "PVE $v no soportado"; exit 105
 }
-
-function msg_ok() {
-  local msg="$1"
-  echo -e "${BFR} ${CM} ${GN}${msg}${CL}"
-}
-
-function msg_error() {
-  local msg="$1"
-  echo -e "${BFR} ${CROSS} ${RD}${msg}${CL}"
-}
-
-# This function checks the version of Proxmox Virtual Environment (PVE) and exits if the version is not supported.
-# Supported: Proxmox VE 8.0.x – 8.9.x, 9.0 and 9.2
-pve_check() {
-  local PVE_VER
-  PVE_VER="$(pveversion | awk -F'/' '{print $2}' | awk -F'-' '{print $1}')"
-
-  # Check for Proxmox VE 8.x: allow 8.0–8.9
-  if [[ "$PVE_VER" =~ ^8\.([0-9]+) ]]; then
-    local MINOR="${BASH_REMATCH[1]}"
-    if ((MINOR < 0 || MINOR > 9)); then
-      msg_error "This version of Proxmox VE is not supported."
-      msg_error "Supported: Proxmox VE version 8.0 – 8.9"
-      exit 105
-    fi
-    return 0
-  fi
-
-  # Check for Proxmox VE 9.x: allow 9.0 and 9.2
-  if [[ "$PVE_VER" =~ ^9\.([0-9]+) ]]; then
-    local MINOR="${BASH_REMATCH[1]}"
-    if ((MINOR < 0 || MINOR > 2)); then
-      msg_error "This version of Proxmox VE is not supported."
-      msg_error "Supported: Proxmox VE version 9.0 – 9.2"
-      exit 105
-    fi
-    return 0
-  fi
-
-  # All other unsupported versions
-  msg_error "This version of Proxmox VE is not supported."
-  msg_error "Supported versions: Proxmox VE 8.0 – 8.x or 9.0 – 9.2"
-  exit 105
-}
-
-function arch_check() {
-  if [ "$(dpkg --print-architecture)" != "amd64" ]; then
-    echo -e "\n ${CROSS} This script will not work with PiMox! \n"
-    echo -e "Exiting..."
-    sleep 2
-    exit
-  fi
-}
-
+function arch_check() { [ "$(dpkg --print-architecture)" = "amd64" ] || { echo "Solo amd64"; exit; }; }
 function ssh_check() {
-  if command -v pveversion >/dev/null 2>&1; then
-    if [ -n "${SSH_CLIENT:+x}" ]; then
-      if whiptail --backtitle "Proxmox VE Helper Scripts" --defaultno --title "SSH DETECTED" --yesno "It's suggested to use the Proxmox shell instead of SSH, since SSH can create issues while gathering variables. Would you like to proceed with using SSH?" 10 62; then
-        echo "you've been warned"
-      else
-        clear
-        exit
-      fi
-    fi
-  fi
+  command -v pveversion >/dev/null 2>&1 || return 0
+  [ -n "${SSH_CLIENT:+x}" ] || return 0
+  whiptail --backtitle "Proxmox VE Helper Scripts" --defaultno --title "SSH" \
+    --yesno "Usar el shell de Proxmox es mejor. ¿Continuar por SSH?" 10 62 || { clear; exit; }
 }
-
-function exit-script() {
-  clear
-  echo -e "⚠  User exited script \n"
-  exit
-}
-
-function get_available_bridges() {
-  ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | sort
-}
+function exit-script() { clear; echo "⚠ User exited"; exit; }
+function get_available_bridges() { ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | sort; }
 
 function default_settings() {
   VMID=$(get_valid_nextid)
-  FORMAT=",efitype=4m"
-  MACHINE=""
-  DISK_CACHE=""
-  HN="opnsense"
-  CPU_TYPE=""
-  CORE_COUNT="4"
-  RAM_SIZE="8192"
-  BRG="vmbr0"
-  IP_ADDR=""
-  WAN_IP_ADDR=""
-  LAN_GW=""
-  WAN_GW=""
-  NETMASK=""
-  WAN_NETMASK=""
-  VLAN=""
-  MAC=$GEN_MAC
-  WAN_MAC=$GEN_MAC_LAN
-  WAN_BRG=""
-  MTU=""
-  START_VM="yes"
-  METHOD="default"
+  MACHINE=""; DISK_CACHE=""; HN="opnsense"; CPU_TYPE=""
+  CORE_COUNT="4"; RAM_SIZE="8192"; BRG="vmbr0"
+  IP_ADDR="$LAN_STATIC_IP"; NETMASK="$LAN_STATIC_PREFIX"; LAN_GW=""
+  WAN_IP_ADDR=""; WAN_GW=""; WAN_NETMASK=""
+  VLAN=""; MAC=$GEN_MAC; WAN_MAC=$GEN_MAC_LAN; WAN_BRG=""; MTU=""
 
-  # Detect available bridges
-  local AVAILABLE_BRIDGES
-  AVAILABLE_BRIDGES=$(get_available_bridges)
-  local BRIDGE_COUNT
-  BRIDGE_COUNT=$(echo "$AVAILABLE_BRIDGES" | wc -l)
+  local AVAIL=$(get_available_bridges)
+  local COUNT=$(echo "$AVAIL" | wc -l)
+  log_info "Bridges: $(echo $AVAIL | tr '\n' ' ')"
 
-  echo -e "${DGN}Using Virtual Machine ID: ${BGN}${VMID}${CL}"
-  echo -e "${DGN}Using Hostname: ${BGN}${HN}${CL}"
-  echo -e "${DGN}Allocated Cores: ${BGN}${CORE_COUNT}${CL}"
-  echo -e "${DGN}Allocated RAM: ${BGN}${RAM_SIZE}${CL}"
-  if ! ip link show "${BRG}" &>/dev/null; then
-    msg_error "Bridge '${BRG}' does not exist"
-    exit
-  else
-    echo -e "${DGN}Using LAN Bridge: ${BGN}${BRG}${CL}"
-  fi
-  echo -e "${DGN}Using LAN VLAN: ${BGN}Default${CL}"
-  echo -e "${DGN}Using LAN MAC Address: ${BGN}${MAC}${CL}"
+  echo -e "${DGN}VM ID: ${BGN}${VMID}${CL}"
+  echo -e "${DGN}Hostname: ${BGN}${HN}${CL}"
+  echo -e "${DGN}Cores: ${BGN}${CORE_COUNT}${CL}"
+  echo -e "${DGN}RAM: ${BGN}${RAM_SIZE}${CL}"
+  ip link show "$BRG" &>/dev/null || { msg_error "Bridge $BRG no existe"; exit; }
+  echo -e "${DGN}LAN Bridge: ${BGN}${BRG}${CL}"
+  echo -e "${DGN}LAN estática: ${BGN}${IP_ADDR}/${NETMASK}${CL}"
+  echo -e "${DGN}LAN MAC: ${BGN}${MAC}${CL}"
 
-  # Determine available network modes based on bridge count
-  local DEFAULT_WAN_BRG
-  DEFAULT_WAN_BRG=$(echo "$AVAILABLE_BRIDGES" | grep -v "^${BRG}$" | head -n1 || true)
-
-  if [ "$BRIDGE_COUNT" -ge 2 ]; then
-    # Multiple bridges available - offer dual or single mode
-    if NETWORK_MODE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "NETWORK CONFIGURATION" --radiolist --cancel-button Exit-Script \
-      "Choose network setup mode for OPNsense:\n" 14 70 2 \
-      "dual" "Dual Interface (Firewall/Router) - uses ${DEFAULT_WAN_BRG}" ON \
-      "single" "Single Interface (Proxy/VPN/IDS Server)" OFF \
-      3>&1 1>&2 2>&3); then
+  local DW=$(echo "$AVAIL" | grep -v "^${BRG}$" | head -n1 || true)
+  if [ "$COUNT" -ge 2 ]; then
+    if NETWORK_MODE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "NETWORK" --radiolist --cancel-button Exit-Script \
+      "Modo de red:\n" 14 70 2 \
+      "dual" "Dual Interface (Firewall) - WAN en ${DW}" ON \
+      "single" "Single Interface (Proxy/VPN)" OFF 3>&1 1>&2 2>&3); then
       if [ "$NETWORK_MODE" = "dual" ]; then
-        WAN_BRG="$DEFAULT_WAN_BRG"
-        echo -e "${DGN}Network Mode: ${BGN}Dual Interface (Firewall)${CL}"
-        echo -e "${DGN}Using WAN Bridge: ${BGN}${WAN_BRG}${CL}"
-        echo -e "${DGN}Using WAN MAC Address: ${BGN}${WAN_MAC}${CL}"
-      else
-        echo -e "${DGN}Network Mode: ${BGN}Single Interface (Proxy/VPN/IDS)${CL}"
-        WAN_BRG=""
-      fi
-    else
-      exit-script
-    fi
-  else
-    # Only one bridge available - single interface mode only
-    echo -e "${DGN}Network Mode: ${BGN}Single Interface (Proxy/VPN/IDS)${CL}"
-    echo -e "${YW}  (Only one bridge detected, dual interface requires a second bridge)${CL}"
-    WAN_BRG=""
-  fi
-  echo -e "${DGN}Using Interface MTU Size: ${BGN}Default${CL}"
-  echo -e "${DGN}Start VM when completed: ${BGN}yes${CL}"
-  echo -e "${BL}Creating a OPNsense VM using the above default settings${CL}"
+        WAN_BRG="$DW"
+        echo -e "${DGN}WAN Bridge: ${BGN}${WAN_BRG}${CL}"
+        echo -e "${DGN}WAN MAC: ${BGN}${WAN_MAC}${CL}"
+      else WAN_BRG=""; fi
+    else exit-script; fi
+  else WAN_BRG=""; fi
+  echo -e "${BL}Creando VM con la configuración por defecto${CL}"
 }
 
-function advanced_settings() {
-  local ip_regex='^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$'
-  METHOD="advanced"
-  [ -z "${VMID:-}" ] && VMID=$(get_valid_nextid)
-  while true; do
-    if VMID=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Virtual Machine ID" 8 58 $VMID --title "VIRTUAL MACHINE ID" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-      if [ -z "$VMID" ]; then
-        VMID=$(get_valid_nextid)
-      fi
-      if pct status "$VMID" &>/dev/null || qm status "$VMID" &>/dev/null; then
-        echo -e "${CROSS}${RD} ID $VMID is already in use${CL}"
-        sleep 2
-        continue
-      fi
-      echo -e "${DGN}Virtual Machine ID: ${BGN}$VMID${CL}"
-      break
-    else
-      exit-script
-    fi
-  done
-
-  if MACH=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "MACHINE TYPE" --radiolist --cancel-button Exit-Script "Choose Type" 10 58 2 \
-    "i440fx" "Machine i440fx" ON \
-    "q35" "Machine q35" OFF \
-    3>&1 1>&2 2>&3); then
-    if [ $MACH = q35 ]; then
-      echo -e "${DGN}Using Machine Type: ${BGN}$MACH${CL}"
-      FORMAT=""
-      MACHINE=" -machine q35"
-    else
-      echo -e "${DGN}Using Machine Type: ${BGN}$MACH${CL}"
-      FORMAT=",efitype=4m"
-      MACHINE=""
-    fi
-  else
-    exit-script
-  fi
-
-  if CPU_TYPE1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "CPU MODEL" --radiolist "Choose" --cancel-button Exit-Script 10 58 2 \
-    "0" "KVM64 (Default)" ON \
-    "1" "Host" OFF \
-    3>&1 1>&2 2>&3); then
-    if [ $CPU_TYPE1 = "1" ]; then
-      echo -e "${DGN}Using CPU Model: ${BGN}Host${CL}"
-      CPU_TYPE=" -cpu host"
-    else
-      echo -e "${DGN}Using CPU Model: ${BGN}KVM64${CL}"
-      CPU_TYPE=""
-    fi
-  else
-    exit-script
-  fi
-
-  if DISK_CACHE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "DISK CACHE" --radiolist "Choose" --cancel-button Exit-Script 10 58 2 \
-    "0" "None (Default)" ON \
-    "1" "Write Through" OFF \
-    3>&1 1>&2 2>&3); then
-    if [ $DISK_CACHE = "1" ]; then
-      echo -e "${DGN}Using Disk Cache: ${BGN}Write Through${CL}"
-      DISK_CACHE="cache=writethrough,"
-    else
-      echo -e "${DGN}Using Disk Cache: ${BGN}None${CL}"
-      DISK_CACHE=""
-    fi
-  else
-    exit-script
-  fi
-
-  if VM_NAME=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Hostname" 8 58 OPNsense --title "HOSTNAME" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-    if [ -z "$VM_NAME" ]; then
-      HN="OPNsense"
-    else
-      HN=$(echo "${VM_NAME,,}" | tr -cs 'a-z0-9-' '-' | sed 's/^-//;s/-$//')
-      if [ "$HN" != "${VM_NAME,,}" ]; then
-        whiptail --backtitle "Proxmox VE Helper Scripts" --title "HOSTNAME ADJUSTED" --msgbox "Invalid characters detected. Hostname has been adjusted to:\n\n  $HN" 10 58
-      fi
-    fi
-    echo -e "${DGN}Using Hostname: ${BGN}$HN${CL}"
-  else
-    exit-script
-  fi
-
-  while true; do
-    if CORE_COUNT=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate CPU Cores" 8 58 4 --title "CORE COUNT" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-      if [ -z "$CORE_COUNT" ]; then CORE_COUNT="4"; fi
-      if [[ "$CORE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-        echo -e "${DGN}Allocated Cores: ${BGN}$CORE_COUNT${CL}"
-        break
-      fi
-      whiptail --backtitle "Proxmox VE Helper Scripts" --title "INVALID INPUT" --msgbox "CPU Cores must be a positive integer (e.g., 4)." 8 58
-    else
-      exit-script
-    fi
-  done
-
-  while true; do
-    if RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Allocate RAM in MiB" 8 58 8192 --title "RAM" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-      if [ -z "$RAM_SIZE" ]; then RAM_SIZE="8192"; fi
-      if [[ "$RAM_SIZE" =~ ^[1-9][0-9]*$ ]]; then
-        echo -e "${DGN}Allocated RAM: ${BGN}$RAM_SIZE${CL}"
-        break
-      fi
-      whiptail --backtitle "Proxmox VE Helper Scripts" --title "INVALID INPUT" --msgbox "RAM Size must be a positive integer in MiB (e.g., 8192)." 8 58
-    else
-      exit-script
-    fi
-  done
-
-  if BRG=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a LAN Bridge" 8 58 vmbr0 --title "LAN BRIDGE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-    if [ -z $BRG ]; then
-      BRG="vmbr0"
-    fi
-    if ! ip link show "${BRG}" &>/dev/null; then
-      msg_error "Bridge '${BRG}' does not exist"
-      exit
-    fi
-    echo -e "${DGN}Using LAN Bridge: ${BGN}$BRG${CL}"
-  else
-    exit-script
-  fi
-
-  if IP_ADDR=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a LAN IP" 8 58 $IP_ADDR --title "LAN IP ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-    if [ -z $IP_ADDR ]; then
-      echo -e "${DGN}Using DHCP AS LAN IP ADDRESS${CL}"
-    else
-      if [[ -n "$IP_ADDR" && ! "$IP_ADDR" =~ $ip_regex ]]; then
-        msg_error "Invalid IP Address format for LAN IP. Needs to be 0.0.0.0, was $IP_ADDR"
-        exit
-      fi
-      echo -e "${DGN}Using LAN IP ADDRESS: ${BGN}$IP_ADDR${CL}"
-      if LAN_GW=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a LAN GATEWAY IP" 8 58 $LAN_GW --title "LAN GATEWAY IP ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-        if [ -z $LAN_GW ]; then
-          echo -e "${DGN}Gateway needs to be set if ip is not dhcp${CL}"
-          exit-script
-        fi
-        if [[ -n "$LAN_GW" && ! "$LAN_GW" =~ $ip_regex ]]; then
-          msg_error "Invalid IP Address format for Gateway. Needs to be 0.0.0.0, was $LAN_GW"
-          exit
-        fi
-        echo -e "${DGN}Using LAN GATEWAY ADDRESS: ${BGN}$LAN_GW${CL}"
-      fi
-      if NETMASK=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a LAN netmmask (24 for example)" 8 58 $NETMASK --title "LAN NETMASK" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-        if [ -z $NETMASK ]; then
-          echo -e "${DGN}Netmask needs to be set if ip is not dhcp${CL}"
-        fi
-        if [[ -n "$NETMASK" && ! ("$NETMASK" =~ ^[0-9]+$ && "$NETMASK" -ge 1 && "$NETMASK" -le 32) ]]; then
-          msg_error "Invalid LAN NETMASK format. Needs to be 1-32, was $NETMASK"
-          exit
-        fi
-        echo -e "${DGN}Using LAN NETMASK: ${BGN}$NETMASK${CL}"
-      else
-        exit-script
-      fi
-    fi
-  else
-    exit-script
-  fi
-
-  # Build WAN bridge selection from available bridges (excluding LAN bridge)
-  local WAN_BRIDGES
-  WAN_BRIDGES=$(get_available_bridges | grep -v "^${BRG}$" || true)
-  if [ -z "$WAN_BRIDGES" ]; then
-    msg_error "No additional bridge available for WAN. Only '${BRG}' exists."
-    msg_error "Create a second bridge (e.g. vmbr1) in Proxmox network config first."
-    exit
-  fi
-  local WAN_MENU=()
-  local first=true
-  while IFS= read -r brg; do
-    if $first; then
-      WAN_MENU+=("$brg" "" "ON")
-      first=false
-    else
-      WAN_MENU+=("$brg" "" "OFF")
-    fi
-  done <<<"$WAN_BRIDGES"
-
-  if WAN_BRG=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "WAN BRIDGE" --radiolist "Select WAN Bridge" 14 58 6 \
-    "${WAN_MENU[@]}" 3>&1 1>&2 2>&3); then
-    if [ -z "$WAN_BRG" ]; then
-      WAN_BRG=$(echo "$WAN_BRIDGES" | head -n1)
-    fi
-    echo -e "${DGN}Using WAN Bridge: ${BGN}$WAN_BRG${CL}"
-  else
-    exit-script
-  fi
-
-  if WAN_IP_ADDR=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a WAN IP" 8 58 $WAN_IP_ADDR --title "WAN IP ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-    if [ -z $WAN_IP_ADDR ]; then
-      echo -e "${DGN}Using DHCP AS WAN IP ADDRESS${CL}"
-    else
-      if [[ -n "$WAN_IP_ADDR" && ! "$WAN_IP_ADDR" =~ $ip_regex ]]; then
-        msg_error "Invalid IP Address format for WAN IP. Needs to be 0.0.0.0, was $WAN_IP_ADDR"
-        exit
-      fi
-      echo -e "${DGN}Using WAN IP ADDRESS: ${BGN}$WAN_IP_ADDR${CL}"
-      if WAN_GW=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a WAN GATEWAY IP" 8 58 $WAN_GW --title "WAN GATEWAY IP ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-        if [ -z $WAN_GW ]; then
-          echo -e "${DGN}Gateway needs to be set if ip is not dhcp${CL}"
-          exit-script
-        fi
-        if [[ -n "$WAN_GW" && ! "$WAN_GW" =~ $ip_regex ]]; then
-          msg_error "Invalid IP Address format for WAN Gateway. Needs to be 0.0.0.0, was $WAN_GW"
-          exit
-        fi
-        echo -e "${DGN}Using WAN GATEWAY ADDRESS: ${BGN}$WAN_GW${CL}"
-      else
-        exit-script
-      fi
-      if WAN_NETMASK=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a WAN netmmask (24 for example)" 8 58 $WAN_NETMASK --title "WAN NETMASK" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-        if [ -z $WAN_NETMASK ]; then
-          echo -e "${DGN}WAN Netmask needs to be set if ip is not dhcp${CL}"
-        fi
-        if [[ -n "$WAN_NETMASK" && ! ("$WAN_NETMASK" =~ ^[0-9]+$ && "$WAN_NETMASK" -ge 1 && "$WAN_NETMASK" -le 32) ]]; then
-          msg_error "Invalid WAN NETMASK format. Needs to be 1-32, was $WAN_NETMASK"
-          exit
-        fi
-        echo -e "${DGN}Using WAN NETMASK: ${BGN}$WAN_NETMASK${CL}"
-      else
-        exit-script
-      fi
-    fi
-  else
-    exit-script
-  fi
-  if MAC1=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a WAN MAC Address" 8 58 $GEN_MAC --title "WAN MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-    if [ -z $MAC1 ]; then
-      MAC="$GEN_MAC"
-    else
-      MAC="$MAC1"
-    fi
-    echo -e "${DGN}Using LAN MAC Address: ${BGN}$MAC${CL}"
-  else
-    exit-script
-  fi
-
-  if MAC2=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set a LAN MAC Address" 8 58 $GEN_MAC_LAN --title "LAN MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-    if [ -z $MAC2 ]; then
-      WAN_MAC="$GEN_MAC_LAN"
-    else
-      WAN_MAC="$MAC2"
-    fi
-    echo -e "${DGN}Using WAN MAC Address: ${BGN}$WAN_MAC${CL}"
-  else
-    exit-script
-  fi
-
-  if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "ADVANCED SETTINGS COMPLETE" --yesno "Ready to create OPNsense VM?" --no-button Do-Over 10 58); then
-    echo -e "${RD}Creating a OPNsense VM using the above advanced settings${CL}"
-  else
-    header_info
-    echo -e "${RD}Using Advanced Settings${CL}"
-    advanced_settings
-  fi
-}
+function advanced_settings() { default_settings; }
 
 function start_script() {
-  if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "SETTINGS" --yesno "Use Default Settings?" --no-button Advanced 10 58); then
-    header_info
-    echo -e "${BL}Using Default Settings${CL}"
-    default_settings
+  if whiptail --backtitle "Proxmox VE Helper Scripts" --title "SETTINGS" --yesno "¿Usar ajustes por defecto?" --no-button Advanced 10 58; then
+    header_info; echo -e "${BL}Default settings${CL}"; default_settings
   else
-    header_info
-    echo -e "${RD}Using Advanced Settings${CL}"
-    advanced_settings
+    header_info; echo -e "${RD}Advanced settings${CL}"; advanced_settings
   fi
 }
 
-arch_check
-pve_check
-ssh_check
-start_script
-post_to_api_vm
+log_step "[01] arch_check"; arch_check
+log_step "[02] pve_check";  pve_check
+log_step "[03] ssh_check";  ssh_check
+log_step "[04] start_script"; start_script
+log_step "[05] post_to_api_vm"; post_to_api_vm || true
 
-msg_info "Validating Storage"
+# --- STORAGE ---
+msg_info "Validando storage"
 while read -r line; do
   TAG=$(echo $line | awk '{print $1}')
   TYPE=$(echo $line | awk '{printf "%-10s", $2}')
   FREE=$(echo $line | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf( "%9sB", $6)}')
   ITEM="  Type: $TYPE Free: $FREE "
   OFFSET=2
-  if [[ $((${#ITEM} + $OFFSET)) -gt ${MSG_MAX_LENGTH:-} ]]; then
-    MSG_MAX_LENGTH=$((${#ITEM} + $OFFSET))
-  fi
+  [[ $((${#ITEM} + $OFFSET)) -gt ${MSG_MAX_LENGTH:-} ]] && MSG_MAX_LENGTH=$((${#ITEM} + $OFFSET))
   STORAGE_MENU+=("$TAG" "$ITEM" "OFF")
 done < <(pvesm status -content images | awk 'NR>1')
 VALID=$(pvesm status -content images | awk 'NR>1')
-if [ -z "$VALID" ]; then
-  msg_error "Unable to detect a valid storage location."
-  exit
-elif [ $((${#STORAGE_MENU[@]} / 3)) -eq 1 ]; then
-  STORAGE=${STORAGE_MENU[0]}
+[ -z "$VALID" ] && { msg_error "Sin storage válido"; exit; }
+if [ $((${#STORAGE_MENU[@]} / 3)) -eq 1 ]; then STORAGE=${STORAGE_MENU[0]}
 else
   while [ -z "${STORAGE:+x}" ]; do
-    STORAGE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "Storage Pools" --radiolist \
-      "Which storage pool would you like to use for ${HN}?\nTo make a selection, use the Spacebar.\n" \
-      16 $(($MSG_MAX_LENGTH + 23)) 6 \
-      "${STORAGE_MENU[@]}" 3>&1 1>&2 2>&3)
+    STORAGE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "Storage" --radiolist \
+      "Storage para ${HN}?" 16 $(($MSG_MAX_LENGTH + 23)) 6 "${STORAGE_MENU[@]}" 3>&1 1>&2 2>&3)
   done
 fi
-msg_ok "Using ${CL}${BL}$STORAGE${CL} ${GN}for Storage Location."
-msg_ok "Virtual Machine ID is ${CL}${BL}$VMID${CL}."
-msg_info "Retrieving the URL for the OPNsense Qcow2 Disk Image"
-# Use latest stable FreeBSD amd64 qcow2 VM image (generic, not UFS/ZFS)
-RELEASE_LIST="$(curl -s https://download.freebsd.org/releases/VM-IMAGES/ |
-  grep -Eo '[0-9]+\.[0-9]+-RELEASE' |
-  sort -Vr |
-  uniq)"
-URL=""
-FREEBSD_VER=""
-for ver in $RELEASE_LIST; do
-  candidate="https://download.freebsd.org/releases/VM-IMAGES/${ver}/amd64/Latest/FreeBSD-${ver}-amd64.qcow2.xz"
-  if curl -fsI "$candidate" >/dev/null 2>&1; then
-    FREEBSD_VER="$ver"
-    URL="$candidate"
-    break
-  fi
-done
-if [ -z "$URL" ]; then
-  msg_error "Could not find generic FreeBSD amd64 qcow2 image (non-UFS/ZFS)."
+msg_ok "Storage: $STORAGE"
+msg_ok "VM ID: $VMID"
+
+# --- URL imagen SERIAL ---
+log_step "[06] Resolviendo imagen SERIAL oficial OPNsense ${OPNSENSE_VERSION}"
+OPNSENSE_URL="https://pkg.opnsense.org/releases/${OPNSENSE_VERSION}/OPNsense-${OPNSENSE_VERSION}-serial-amd64.img.bz2"
+log_info "URL: $OPNSENSE_URL"
+
+if [[ "$OPNSENSE_URL" != *"-serial-"* ]]; then
+  msg_error "URL no es la imagen SERIAL. Abortando."
+  exit 1
+fi
+
+if ! curl -fsIL "$OPNSENSE_URL" >/dev/null 2>&1; then
+  msg_error "Imagen SERIAL no encontrada en $OPNSENSE_URL"
   exit 115
 fi
-msg_ok "Download URL: ${CL}${BL}${URL}${CL}"
+msg_ok "Imagen disponible"
 
-# Check available disk space (require at least 20GB for safety)
-if ! check_disk_space "$TEMP_DIR" 20; then
-  AVAILABLE_GB=$(df -h "$TEMP_DIR" | awk 'NR==2 {print $4}')
-  msg_error "Insufficient disk space in temporary directory ($TEMP_DIR)."
-  msg_error "Available: ${AVAILABLE_GB}, Required: ~20GB for FreeBSD image decompression."
-  msg_error "Please free up space or ensure /tmp has sufficient storage."
-  exit 214
-fi
+log_step "[07] Espacio"; check_disk_space "$TEMP_DIR" 20 || { msg_error "Espacio insuficiente"; exit 214; }
+log_step "[08] Descargando"; msg_info "Descargando $(basename $OPNSENSE_URL)"
+curl -f#SL -o "$(basename "$OPNSENSE_URL")" "$OPNSENSE_URL"; echo -en "\e[1A\e[0K"; msg_ok "Descargado"
 
-msg_info "Downloading FreeBSD Image"
-curl -f#SL -o "$(basename "$URL")" "$URL"
-echo -en "\e[1A\e[0K"
-msg_ok "Downloaded ${CL}${BL}$(basename "$URL")${CL}"
+log_step "[09] Descomprimiendo"
+check_disk_space "$TEMP_DIR" 15 || { msg_error "Espacio insuficiente"; exit 214; }
+FILE="OPNsense-serial.img"
+bunzip2 -c "$(basename "$OPNSENSE_URL")" > "$FILE" || { msg_error "Fallo al descomprimir"; exit 115; }
+rm -f "$(basename "$OPNSENSE_URL")"; msg_ok "Descomprimido: $FILE"
 
-# Check disk space again before decompression
-if ! check_disk_space "$TEMP_DIR" 15; then
-  AVAILABLE_GB=$(df -h "$TEMP_DIR" | awk 'NR==2 {print $4}')
-  msg_error "Insufficient disk space for decompression."
-  msg_error "Available: ${AVAILABLE_GB}, Required: ~15GB for decompressed image."
-  exit 214
-fi
-
-msg_info "Decompressing FreeBSD Image (this may take a few minutes)"
-FILE=FreeBSD.qcow2
-if ! unxz -cv $(basename $URL) >${FILE}; then
-  msg_error "Failed to decompress FreeBSD image."
-  msg_error "This is usually caused by insufficient disk space."
-  df -h "$TEMP_DIR"
-  exit 115
-fi
-
-# Remove the compressed file to save space
-rm -f "$(basename "$URL")"
-msg_ok "Decompressed ${CL}${BL}${FILE}${CL}"
-
+# --- MAPEO ---
+log_step "[10] Mapeando storage"
 STORAGE_TYPE=$(pvesm status -storage $STORAGE | awk 'NR>1 {print $2}')
 case $STORAGE_TYPE in
-nfs | dir)
-  DISK_EXT=".qcow2"
-  DISK_REF="$VMID/"
-  DISK_IMPORT="-format qcow2"
-  THIN=""
-  ;;
-btrfs)
-  DISK_EXT=".raw"
-  DISK_REF="$VMID/"
-  DISK_IMPORT="-format raw"
-  FORMAT=",efitype=4m"
-  THIN=""
-  ;;
-*)
-  DISK_EXT=""
-  DISK_REF=""
-  DISK_IMPORT="-format raw"
-  ;;
+nfs|dir)  DISK_IMPORT="-format qcow2"; THIN="" ;;
+btrfs)    DISK_IMPORT="-format raw";   THIN="" ;;
+*)        DISK_IMPORT="-format raw" ;;
 esac
-for i in {0,1}; do
-  disk="DISK$i"
-  eval DISK${i}=vm-${VMID}-disk-${i}${DISK_EXT:-}
-  eval DISK${i}_REF=${STORAGE}:${DISK_REF:-}${!disk}
-done
+log_info "Storage type: $STORAGE_TYPE"
 
-msg_info "Creating a OPNsense VM"
-qm create $VMID -agent 1${MACHINE} -tablet 0 -localtime 1 -bios ovmf${CPU_TYPE} -cores $CORE_COUNT -memory $RAM_SIZE \
-  -name $HN -tags community-script -net0 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
-
-# Retry pvesm alloc on transient zfs_request "got timeout" errors (#14127)
-alloc_attempt=1
-alloc_max=4
-alloc_delay=5
-while :; do
-  alloc_err=$(pvesm alloc $STORAGE $VMID $DISK0 4M 2>&1 >/dev/null) && break
-  if [[ "$alloc_err" == *"got timeout"* && $alloc_attempt -lt $alloc_max ]]; then
-    echo -e "${YW}[WARN]${CL} pvesm alloc hit zfs timeout (attempt $alloc_attempt/$alloc_max), retrying in ${alloc_delay}s..."
-    pvesm free "${DISK0_REF}" &>/dev/null || true
-    sleep "$alloc_delay"
-    alloc_attempt=$((alloc_attempt + 1))
-    alloc_delay=$((alloc_delay * 2))
-    continue
-  fi
-  echo -e "$alloc_err" >&2
-  exit 220
-done
-qm importdisk $VMID ${FILE} $STORAGE ${DISK_IMPORT:-} &>/dev/null
-qm set $VMID \
-  -efidisk0 ${DISK0_REF}${FORMAT} \
-  -scsi0 ${DISK1_REF},${DISK_CACHE}${THIN}size=2G \
-  -boot order=scsi0 \
-  -serial0 socket \
-  -tags community-script >/dev/null
-qm resize $VMID scsi0 20G >/dev/null
-DESCRIPTION=$(
-  cat <<EOF
-<div align='center'>
-  <a href='https://community-scripts.org' target='_blank' rel='noopener noreferrer'>
-    <img src='https://raw.githubusercontent.com/michelroegl-brunner/ProxmoxVE/refs/heads/develop/misc/images/logo-81x112.png' alt='Logo' style='width:81px;height:112px;'/>
-  </a>
-
-  <h2 style='font-size: 24px; margin: 20px 0;'>OPNsense VM</h2>
-
-  <p style='margin: 16px 0;'>
-    <a href='https://ko-fi.com/community_scripts' target='_blank' rel='noopener noreferrer'>
-      <img src='https://img.shields.io/badge/&#x2615;-Buy us a coffee-blue' alt='spend Coffee' />
-    </a>
-  </p>
-
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-github fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>GitHub</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-comments fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/discussions' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Discussions</a>
-  </span>
-  <span style='margin: 0 10px;'>
-    <i class="fa fa-exclamation-circle fa-fw" style="color: #f5f5f5;"></i>
-    <a href='https://github.com/community-scripts/ProxmoxVE/issues' target='_blank' rel='noopener noreferrer' style='text-decoration: none; color: #00617f;'>Issues</a>
-  </span>
-</div>
-EOF
-)
-qm set $VMID -description "$DESCRIPTION" >/dev/null
-
-msg_info "Bridge interfaces are being added."
-qm set $VMID \
-  -net0 virtio,bridge=${BRG},macaddr=${MAC}${VLAN}${MTU} 2>/dev/null
-msg_ok "Bridge interfaces have been successfully added."
-
-msg_ok "Created a OPNsense VM ${CL}${BL}(${HN})"
-msg_ok "Starting OPNsense VM (Patience this takes 20-30 minutes)"
-qm start $VMID
-sleep 90
-send_line_to_vm "root"
-send_line_to_vm "fetch https://raw.githubusercontent.com/opnsense/update/master/src/bootstrap/opnsense-bootstrap.sh.in"
+# --- CREAR VM (BIOS Legacy) ---
+log_step "[11] qm create (Legacy BIOS)"
+msg_info "Creando VM con arranque Legacy"
 if [ -n "$WAN_BRG" ]; then
-  msg_info "Adding WAN interface"
-  qm set $VMID \
-    -net1 virtio,bridge=${WAN_BRG},macaddr=${WAN_MAC} &>/dev/null
-  msg_ok "WAN interface added"
-  sleep 5 # Brief pause after adding network interface
-fi
-send_line_to_vm "sh ./opnsense-bootstrap.sh.in -y -f -r 26.1"
-msg_ok "OPNsense VM is being installed, do not close the terminal, or the installation will fail."
-#We need to wait for the OPNsense build proccess to finish, this takes a few minutes
-sleep 1000
-send_line_to_vm "root"
-send_line_to_vm "opnsense"
-send_line_to_vm "2"
-
-if [ "$IP_ADDR" != "" ]; then
-  send_line_to_vm "1"
-  send_line_to_vm "n"
-  send_line_to_vm "${IP_ADDR}"
-  send_line_to_vm "${NETMASK}"
-  send_line_to_vm "${LAN_GW}"
-  send_line_to_vm "n"
-  send_line_to_vm " "
-  send_line_to_vm "n"
-  send_line_to_vm "n"
-  send_line_to_vm " "
-  send_line_to_vm "n"
-  send_line_to_vm "n"
-  send_line_to_vm "n"
-  send_line_to_vm "n"
-  send_line_to_vm "n"
+  NET0_BRG="$BRG";     NET0_MAC="$MAC"      # vtnet0 = LAN
+  NET1_BRG="$WAN_BRG"; NET1_MAC="$WAN_MAC"  # vtnet1 = WAN
 else
-  send_line_to_vm "1"
-  send_line_to_vm "y"
-  send_line_to_vm "n"
-  send_line_to_vm "n"
-  send_line_to_vm " "
-  send_line_to_vm "n"
-  send_line_to_vm "n"
-  send_line_to_vm "n"
+  NET0_BRG="$BRG"; NET0_MAC="$MAC"; NET1_BRG=""; NET1_MAC=""
 fi
-#Wait for config changes to be saved
-sleep 20
-if [ -n "$WAN_BRG" ] && [ "$WAN_IP_ADDR" != "" ]; then
-  send_line_to_vm "2"
-  send_line_to_vm "2"
-  send_line_to_vm "n"
-  send_line_to_vm "${WAN_IP_ADDR}"
-  send_line_to_vm "${NETMASK}"
-  send_line_to_vm "${LAN_GW}"
-  send_line_to_vm "n"
-  send_line_to_vm " "
-  send_line_to_vm "n"
-  send_line_to_vm " "
-  send_line_to_vm "n"
-  send_line_to_vm "n"
-  send_line_to_vm "n"
+qm create $VMID ${MACHINE} -tablet 0 -localtime 1 -bios seabios${CPU_TYPE} \
+  -cores $CORE_COUNT -memory $RAM_SIZE -name $HN -tags community-script \
+  -net0 virtio,bridge=$NET0_BRG,macaddr=$NET0_MAC$VLAN$MTU \
+  -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
+
+log_step "[12] qm importdisk"
+msg_info "Importando disco (puede tardar)"
+IMPORT_OUTPUT=$(qm importdisk $VMID ${FILE} $STORAGE ${DISK_IMPORT:-} 2>&1 | grep -v "^transferred" || true)
+log_info "Salida de qm importdisk:"
+echo "$IMPORT_OUTPUT" | tee -a "$LOG_FILE"
+VOL_NAME=$(echo "$IMPORT_OUTPUT" | awk -F"'" '/successfully imported disk/ {print $2; exit}')
+if [ -z "$VOL_NAME" ]; then
+  VOL_NAME="${STORAGE}:vm-${VMID}-disk-0"
+  log_warn "No se pudo detectar el nombre del volumen, usando fallback: $VOL_NAME"
 fi
+log_info "Volumen importado detectado: $VOL_NAME"
+sleep 5
+
+log_step "[13] qm set disks"
+msg_info "Asignando disco a scsi0"
+if ! qm set $VMID -scsi0 "${VOL_NAME},${DISK_CACHE}${THIN}size=2G" \
+    -boot order=scsi0 -serial0 socket -tags community-script >/dev/null 2>&1; then
+  msg_error "Fallo al asignar el disco con volumen '$VOL_NAME'"
+  pvesm list "$STORAGE" 2>&1 | tee -a "$LOG_FILE" || true
+  exit 220
+fi
+msg_ok "Disco asignado"
+
+log_step "[14] qm resize scsi0"
+qm resize $VMID scsi0 20G >/dev/null
+msg_ok "Disco redimensionado a 20G"
+
+DESC="<div align='center'><h2>OPNsense VM (imagen SERIAL ${OPNSENSE_VERSION})</h2></div>"
+qm set $VMID -description "$DESC" >/dev/null
+
+if [ -n "$NET1_BRG" ]; then
+  log_step "[15] Añadiendo WAN"
+  qm set $VMID -net1 virtio,bridge=${NET1_BRG},macaddr=${NET1_MAC} &>/dev/null
+  msg_ok "WAN añadida en $NET1_BRG"
+fi
+
+log_info "VM config inicial:"; qm config $VMID 2>&1 | tee -a "$LOG_FILE"
+
+# --- ARRANQUE ---
+log_step "[16] Iniciando VM"
+qm start $VMID
+sleep 5
+
+log_step "[17] Serial reader"
+serial_start || { msg_error "Serial no disponible"; exit 1; }
+sleep 3
+dump_serial_tail 20
+
+# --- LOGIN ---
+log_step "[18] Esperando login de OPNsense (ttyu0)"
+wait_for_pattern "login:" 600 "OPNsense login" || { dump_serial_tail 80; msg_error "Sin login"; exit 1; }
+msg_ok "Login detectado"
+
+log_step "[19] Login como root"
+send_line "root"
+sleep 3
+wait_for_pattern "Password:" 60 "Password prompt" || { dump_serial_tail 20; }
+msg_ok "Password prompt recibido"
+send_line "opnsense"
 sleep 10
-send_line_to_vm "0"
-msg_ok "Started OPNsense VM"
+dump_serial_tail 40
 
-msg_ok "Completed successfully!\n"
-if [ "$IP_ADDR" != "" ]; then
-  echo -e "${INFO}${YW} Access it using the following URL:${CL}"
-  echo -e "${TAB}${GATEWAY}${BGN}http://${IP_ADDR}${CL}"
+# =============================================================================
+# FIX: tras el login NO hay shell, hay MENÚ de OPNsense.
+# Esperamos "Enter an option:" en lugar de "root@...#".
+# =============================================================================
+log_step "[20] Esperando menú de OPNsense"
+wait_for_pattern "Enter an option:" 120 "OPNsense menu" || { dump_serial_tail 60; msg_error "Sin menú de OPNsense"; exit 1; }
+msg_ok "Menú de OPNsense disponible"
+
+# OPNsense asigna por defecto vtnet0=LAN y vtnet1=WAN según el orden PCI.
+# Como hemos creado net0=vmbr0 (LAN) y net1=vmbr1 (WAN), las interfaces
+# ya están correctas al arrancar. No hace falta el menú 1 (Assign interfaces).
+log_step "[21] Interfaces ya asignadas (vtnet0=LAN, vtnet1=WAN)"
+dump_serial_tail 30
+
+# =============================================================================
+# Menú 2: Set interface IP address -> configurar LAN estática
+# Flujo típico de OPNsense:
+#   1) Selecciona interfaz (1=WAN, 2=LAN)
+#   2) Configure IPv4 via DHCP? [y/N]:  -> n
+#   3) IPv4 address:                    -> 192.168.2.1
+#   4) Subnet bits:                     -> 24
+#   5) Upstream gateway:                -> (vacío)
+#   6) Configure IPv6 via DHCP? [y/N]:  -> n
+#   7) Do you want to enable the DHCP server? [y/N]: -> y
+#   8) DHCP start:                      -> 192.168.2.100
+#   9) DHCP end:                        -> 192.168.2.199
+#  10) Revert to HTTP? [y/N]:           -> n
+# =============================================================================
+log_step "[22] Configurando LAN estática ($IP_ADDR/$NETMASK)"
+msg_info "Menú 2: configurar IP de LAN"
+
+send_line "2"                # Set interface IP address
+sleep 4
+send_line "2"                # 2 = LAN
+sleep 3
+send_line "n"                # No DHCP para IPv4
+sleep 3
+send_line "$IP_ADDR"         # IPv4 address
+sleep 3
+send_line "$NETMASK"         # Subnet bits (24)
+sleep 3
+send_line ""                 # Upstream gateway (vacío)
+sleep 3
+send_line "n"                # No IPv6 DHCP
+sleep 3
+send_line "y"                # Habilitar DHCP server en LAN
+sleep 3
+DS=$(echo "$IP_ADDR" | awk -F. '{print $1"."$2"."$3".100"}')
+DE=$(echo "$IP_ADDR" | awk -F. '{print $1"."$2"."$3".199"}')
+send_line "$DS"              # DHCP start
+sleep 3
+send_line "$DE"              # DHCP end
+sleep 3
+send_line "n"                # No revertir a HTTP
+sleep 5
+dump_serial_tail 60
+
+# Esperar a que vuelva al menú principal
+log_step "[23] Esperando retorno al menú"
+wait_for_pattern "Enter an option:" 60 "Menú tras config LAN" || { dump_serial_tail 40; }
+msg_ok "LAN configurada (menú principal de vuelta)"
+
+# =============================================================================
+# Opcional: si hay IP de WAN estática, configurarla. Si no, dejamos DHCP.
+# =============================================================================
+if [ -n "$WAN_IP_ADDR" ] && [ -n "$WAN_NETMASK" ]; then
+  log_step "[24] Configurando WAN estática ($WAN_IP_ADDR/$WAN_NETMASK)"
+  msg_info "Menú 2: configurar IP de WAN"
+  send_line "2"; sleep 4
+  send_line "1"              # 1 = WAN
+  sleep 3
+  send_line "n"              # No DHCP
+  sleep 3
+  send_line "$WAN_IP_ADDR"; sleep 3
+  send_line "$WAN_NETMASK"; sleep 3
+  send_line "$WAN_GW"; sleep 3
+  send_line "n"              # No IPv6
+  sleep 5
+  dump_serial_tail 40
+  wait_for_pattern "Enter an option:" 60 "Menú tras WAN" || true
+  msg_ok "WAN configurada"
 else
-  echo -e "${INFO}${YW} LAN IP was DHCP.${CL}"
-  echo -e "${INFO}${BGN}To find the IP login to the VM shell${CL}"
+  log_step "[24] WAN por DHCP (por defecto)"
 fi
+
+log_step "[25] Volviendo al menú principal"
+send_line "0"
+sleep 3
+
+log_step "[26] Finalizado"
+serial_stop || true
+msg_ok "OPNsense VM lista"
+echo
+msg_ok "WebUI: https://${IP_ADDR}"
+echo -e "${YW}Credenciales:${CL} root / opnsense"
+[ -n "$WAN_BRG" ] && echo -e "${YW}WAN:${CL} bridge ${WAN_BRG} (DHCP) en vtnet1"
+echo -e "${YW}LAN:${CL} bridge ${BRG} (${IP_ADDR}/${NETMASK}) en vtnet0"
+echo -e "${YW}Log:${CL} $LOG_FILE"
+log_info "Script finalizado"

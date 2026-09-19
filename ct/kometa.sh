@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Slaviša Arežina (tremor021)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-4096}"
 var_disk="${var_disk:-8}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -39,12 +41,14 @@ function update_script() {
     cp /opt/kometa/config/config.yml /opt
     msg_ok "Backup completed"
 
+    ensure_dependencies git
     PYTHON_VERSION="3.13" setup_uv
     fetch_and_deploy_gh_release "kometa" "Kometa-Team/Kometa" "tarball"
 
     msg_info "Updating Kometa"
     cd /opt/kometa
-    $STD uv pip install -r requirements.txt --system
+    [[ -d /opt/kometa/.venv ]] || $STD uv venv /opt/kometa/.venv
+    $STD uv pip install -r requirements.txt -p /opt/kometa/.venv/bin/python
     mkdir -p config/assets
     cp /opt/config.yml config/config.yml
     msg_ok "Updated Kometa"
@@ -82,5 +86,5 @@ description
 
 msg_ok "Completed successfully!\n"
 echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
-echo -e "${INFO}${YW} Access Kometa Quickstart:${CL}"
+echo -e "${INFO}${YW}Access Kometa Quickstart:${CL}"
 echo -e "${GATEWAY}${BGN}http://${IP}:7171${CL}"

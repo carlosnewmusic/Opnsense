@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: vhsdream
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-512}"
 var_disk="${var_disk:-4}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -36,19 +38,17 @@ function update_script() {
     [[ -f /etc/systemd/system/soularr.service ]] && systemctl stop soularr.timer soularr.service
     msg_ok "Stopped Service(s)"
 
-    msg_info "Backing up config"
-    cp /opt/slskd/config/slskd.yml /opt/slskd.yml.bak
-    msg_ok "Backed up config"
+    create_backup /opt/slskd/config/slskd.yml
 
-    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "Slskd" "slskd/slskd" "prebuild" "latest" "/opt/slskd" "slskd-*-linux-x64.zip"
+    CLEAN_INSTALL=1 fetch_and_deploy_gh_release "Slskd" "slskd/slskd" "prebuild" "latest" "/opt/slskd" "slskd-*-linux-$(arch_resolve "x64" "arm64").zip"
 
-    msg_info "Restoring config"
-    mv /opt/slskd.yml.bak /opt/slskd/config/slskd.yml
+    restore_backup
 
+    msg_info "Migrating config"
     # Migrate 0.25.0 breaking config key renames
     sed -i 's/^global:/transfers:/' /opt/slskd/config/slskd.yml
     sed -i 's/^integration:/integrations:/' /opt/slskd/config/slskd.yml
-    msg_ok "Restored config"
+    msg_ok "Migrated config"
 
     msg_info "Starting Service(s)"
     systemctl start slskd
@@ -63,13 +63,11 @@ function update_script() {
       msg_ok "Stopped Timer and Service"
     fi
 
-    msg_info "Backing up Soularr config"
-    cp /opt/soularr/config.ini /opt/soularr_config.ini.bak
-    cp /opt/soularr/run.sh /opt/soularr_run.sh.bak
-    msg_ok "Backed up Soularr config"
+    create_backup /opt/soularr/config.ini /opt/soularr/run.sh
 
     PYTHON_VERSION="3.11" setup_uv
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "Soularr" "mrusse/soularr" "tarball" "latest" "/opt/soularr"
+    restore_backup
     msg_info "Updating Soularr"
     cd /opt/soularr
     $STD uv venv -c venv
@@ -77,11 +75,6 @@ function update_script() {
     $STD uv pip install -r requirements.txt
     deactivate
     msg_ok "Updated Soularr"
-
-    msg_info "Restoring Soularr config"
-    mv /opt/soularr_config.ini.bak /opt/soularr/config.ini
-    mv /opt/soularr_run.sh.bak /opt/soularr/run.sh
-    msg_ok "Restored Soularr config"
 
     msg_info "Starting Soularr Timer"
     systemctl restart soularr.timer

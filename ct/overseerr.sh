@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 tteck
 # Author: tteck (tteckster)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -61,18 +63,16 @@ EOF
     systemctl stop overseerr
     msg_ok "Service stopped"
 
-    msg_info "Creating backup"
-    mv /opt/overseerr/config /opt/config_backup
-    msg_ok "Backup created"
+    create_backup /opt/overseerr/config
 
     fetch_and_deploy_gh_release "overseerr" "sct/overseerr" "tarball"
-    rm -rf /opt/overseerr/config
+
+    restore_backup
 
     msg_info "Configuring ${APP} (Patience)"
     cd /opt/overseerr
     $STD yarn install
     $STD yarn build
-    mv /opt/config_backup /opt/overseerr/config
     msg_ok "Configured ${APP}"
 
     msg_info "Starting Service"

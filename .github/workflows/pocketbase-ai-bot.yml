@@ -26,28 +26,28 @@ jobs:
     steps:
       - name: Mint GitHub App token (bot identity)
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.PB_BOT_APP_ID }}
-          private-key: ${{ secrets.PB_BOT_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.GHAPP_PBBOT_ID }}
+          private-key: ${{ secrets.GHAPP_PBBOT_PRIVATE_KEY }}
 
       - name: Run PocketBase AI bot
         env:
           # GitHub REST as the bot identity
           GH_APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          PB_BOT_APP_ID: ${{ secrets.PB_BOT_APP_ID }}
+          PB_BOT_APP_ID: ${{ vars.GHAPP_PBBOT_ID }}
           # GitHub Models inference uses the built-in token (needs models: read)
           MODELS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Built-in token for git/PR ops (CT-defaults sync), mirroring the slash bot
           GH_DEFAULT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AI_MODEL: openai/gpt-4o
           # PocketBase
-          POCKETBASE_URL: ${{ secrets.POCKETBASE_URL }}
-          POCKETBASE_COLLECTION: ${{ secrets.POCKETBASE_COLLECTION }}
+          POCKETBASE_URL: ${{ vars.POCKETBASE_URL }}
+          POCKETBASE_COLLECTION: ${{ vars.POCKETBASE_COLLECTION }}
           POCKETBASE_ADMIN_EMAIL: ${{ secrets.POCKETBASE_ADMIN_EMAIL }}
           POCKETBASE_ADMIN_PASSWORD: ${{ secrets.POCKETBASE_ADMIN_PASSWORD }}
-          FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
-          REVALIDATE_SECRET: ${{ secrets.REVALIDATE_SECRET }}
+          FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+          REVALIDATE_SECRET: ${{ secrets.FRONTEND_INGEST_SECRET }}
           # Event context
           COMMENT_BODY: ${{ github.event.comment.body }}
           COMMENT_ID: ${{ github.event.comment.id }}
@@ -314,11 +314,16 @@ jobs:
             // ── Allow-lists (mirror the slash bot) ─────────────────────────────
             const ALLOWED_FIELDS = {
               name: 'string', description: 'string', logo: 'string', documentation: 'string',
-              website: 'string', project_url: 'string', github: 'string', config_path: 'string',
+              website: 'string', project_url: 'string', repository: 'string', config_path: 'string',
               tags: 'string', port: 'number', default_user: 'nullable_string', default_passwd: 'nullable_string',
-              unprivileged: 'number', updateable: 'boolean', privileged: 'boolean', has_arm: 'boolean',
+              unprivileged: 'number', updateable: 'boolean', privileged: 'boolean',
+              architectures: 'select_list', platforms: 'select_list',
               is_dev: 'boolean', is_disabled: 'boolean', disable_message: 'string',
               is_deleted: 'boolean', deleted_message: 'string'
+            };
+            const SELECT_VALUES = {
+              architectures: ['amd64', 'arm64'],
+              platforms: ['pve', 'incus'],
             };
             const FIELD_TO_CT_VAR = { tags: 'var_tags', unprivileged: 'var_unprivileged' };
             const RESOURCE_KEYS = { cpu: 'number', ram: 'number', hdd: 'number', os: 'string', version: 'string' };
@@ -338,6 +343,17 @@ jobs:
                 const n = parseInt(rawVal, 10);
                 if (isNaN(n)) return { error: '`' + key + '` must be a number' };
                 return { value: n };
+              }
+              if (type === 'select_list') {
+                // architectures/platforms are multi-selects over a closed set,
+                // so an unknown value is rejected rather than stored. The model
+                // may hand back an array or a comma-separated string.
+                const allowed = SELECT_VALUES[key] || [];
+                const raw = Array.isArray(rawVal) ? rawVal : String(rawVal == null ? '' : rawVal).split(',');
+                const values = raw.map(function (v) { return String(v).trim(); }).filter(Boolean);
+                const bad = values.filter(function (v) { return allowed.indexOf(v) === -1; });
+                if (bad.length > 0) return { error: '`' + key + '` accepts ' + allowed.join(', ') + ' — got: ' + bad.join(', ') };
+                return { value: values };
               }
               if (type === 'nullable_string') return { value: rawVal === '' || rawVal == null ? null : String(rawVal) };
               return { value: String(rawVal) };

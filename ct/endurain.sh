@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: johanngrobe
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -34,38 +36,30 @@ function update_script() {
     systemctl stop endurain
     msg_ok "Stopped Service"
 
-    msg_info "Creating Backup"
-    cp /opt/endurain/.env /opt/endurain.env
-    cp /opt/endurain/frontend/app/dist/env.js /opt/endurain.env.js
-    msg_ok "Created Backup"
-
+    NODE_VERSION="24" setup_nodejs
+    create_backup /opt/endurain/.env /opt/endurain/frontend/dist/env.js
     CLEAN_INSTALL=1 fetch_and_deploy_codeberg_release "endurain" "endurain-project/endurain" "tarball" "latest" "/opt/endurain"
 
-    msg_info "Preparing Update"
+    msg_info "Updating Endurain Frontend"
     cd /opt/endurain
-    rm -rf \
-      /opt/endurain/{docs,example.env,screenshot_01.png} \
-      /opt/endurain/docker* \
-      /opt/endurain/*.yml
-    cp /opt/endurain.env /opt/endurain/.env
-    rm /opt/endurain.env
-    msg_ok "Prepared Update"
-
-    msg_info "Updating Frontend"
-    cd /opt/endurain/frontend/app
+    rm -rf /opt/endurain/{docs,example.env,screenshot_01.png} /opt/endurain/docker* /opt/endurain/*.yml
+    cd /opt/endurain/frontend
     $STD npm ci
     $STD npm run build
-    cp /opt/endurain.env.js /opt/endurain/frontend/app/dist/env.js
-    rm /opt/endurain.env.js
-    msg_ok "Updated Frontend"
+    msg_ok "Updated Endurain Frontend"
 
-    msg_info "Updating Backend"
+    restore_backup
+
+    if grep -qxF 'FRONTEND_DIR="/opt/endurain/frontend/app/dist"' /opt/endurain/.env; then
+      sed -i 's|^FRONTEND_DIR="/opt/endurain/frontend/app/dist"$|FRONTEND_DIR="/opt/endurain/frontend/dist"|' /opt/endurain/.env
+    fi
+
+    msg_info "Updating Endurain Backend"
     cd /opt/endurain/backend
-    $STD poetry export -f requirements.txt --output requirements.txt --without-hashes
-    $STD uv venv --clear
-    $STD uv pip install -r requirements.txt
-    $STD uv pip install pytz
-    msg_ok "Backend Updated"
+    UV_VERSION=$(grep -Po 'required-version\s*=\s*"\K[^"]+' pyproject.toml 2>/dev/null || echo "0.11.18")
+    UV_VERSION="$UV_VERSION" setup_uv
+    $STD uv sync --frozen --no-dev
+    msg_ok "Endurain Backend Updated"
 
     msg_info "Starting Service"
     systemctl start endurain

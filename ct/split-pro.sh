@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: johanngrobe
@@ -13,7 +15,7 @@ var_ram="${var_ram:-4096}"
 var_disk="${var_disk:-6}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 variables
@@ -35,18 +37,16 @@ function update_script() {
     systemctl stop split-pro
     msg_ok "Stopped Service"
 
-    msg_info "Backing up Data"
-    cp /opt/split-pro/.env /opt/split-pro.env
-    msg_ok "Backed up Data"
+    create_backup /opt/split-pro/.env
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "split-pro" "oss-apps/split-pro" "tarball"
+
+    restore_backup
 
     msg_info "Building Application"
     cd /opt/split-pro
     $STD pnpm install --frozen-lockfile
     $STD pnpm build
-    cp /opt/split-pro.env /opt/split-pro/.env
-    rm -f /opt/split-pro.env
     ln -sf /opt/split-pro_data/uploads /opt/split-pro/uploads
     $STD pnpm exec prisma migrate deploy
     msg_ok "Built Application"

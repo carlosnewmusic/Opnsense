@@ -4,8 +4,9 @@
 # Author: BvdBerg01 | Co-Author: remz1337
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/refs/heads/main/misc/core.func)
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func) 2>/dev/null || true
+_CS_CORE_URL="${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}"
+source <(curl -fsSL "${_CS_CORE_URL}/core/core.func")
+source <(curl -fsSL "${_CS_CORE_URL}/api/api.func") 2>/dev/null || true
 declare -f init_tool_telemetry &>/dev/null && init_tool_telemetry "update-apps" "pve"
 
 # =============================================================================
@@ -145,11 +146,73 @@ function header_info {
 EOF
 }
 
+function sanitize_service_name() {
+  local name="${1//$'\r'/}"
+  name="${name//$'\n'/}"
+  [[ -z "$name" ]] && return 1
+  [[ "$name" == *'#!'* ]] && return 1
+  [[ ! "$name" =~ ^[a-zA-Z0-9._-]+$ ]] && return 1
+  return 0
+}
+
+function script_exists() {
+  local name="$1"
+  sanitize_service_name "$name" || return 1
+  curl -fsSL --max-time 10 -o /dev/null \
+    "https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/${name}.sh" 2>/dev/null
+}
+
+# A container keeps the slug it was built with, so a renamed ct/ script leaves it
+# pointing at a name that no longer exists. Try the successors, but only accept one
+# that is really there -- guessing wrong would run a foreign app's updater.
+function resolve_service_script() {
+  local n="$1" c
+  script_exists "$n" && { printf '%s' "$n"; return 0; }
+  for c in "${n#alpine-}" "$(printf '%s' "$n" | sed -E 's/-v[0-9]+$//')"; do
+    [[ -n "$c" && "$c" != "$n" ]] || continue
+    script_exists "$c" && { printf '%s' "$c"; return 0; }
+  done
+  case "$n" in
+  pbs) script_exists proxmox-backup-server && { printf '%s' proxmox-backup-server; return 0; } ;;
+  esac
+  return 1
+}
+
+# The retired Gitea mirror. The old entrypoint pulls ct/<app>.sh straight from
+# it and never reaches the update helper that would repair itself, so rewrite it
+# here. Only host and /raw/<kind>/ change; owner, repo and ref are kept.
+function repair_update_url() {
+  local container="$1"
+  pct exec "$container" -- sh -c '
+    [ -f /usr/bin/update ] || exit 1
+    grep -q git.community-scripts.org /usr/bin/update || exit 1
+    sed -i \
+      -e "s|https://git[.]community-scripts[.]org/|https://raw.githubusercontent.com/|g" \
+      -e "s|/raw/branch/|/|g" -e "s|/raw/tag/|/|g" -e "s|/raw/commit/|/|g" \
+      /usr/bin/update
+  ' >/dev/null 2>&1 || return 1
+
+  echo -e "${BL}[INFO]${CL} Repaired update URL (Gitea -> GitHub) in container $container"
+  log_write "Container $container: rewrote the retired Gitea base in /usr/bin/update"
+}
+
 function detect_service() {
-  pushd $(mktemp -d) >/dev/null
-  pct pull "$1" /usr/bin/update update 2>/dev/null
-  service=$(cat update | sed 's|.*/ct/||g' | sed 's|\.sh).*||g')
-  popd >/dev/null
+  local container="$1"
+  local tmpdir update_file
+  service=""
+  tmpdir=$(mktemp -d)
+  update_file="$tmpdir/update"
+  pct pull "$container" /usr/bin/update "$update_file" 2>/dev/null || true
+  if [[ ! -s "$update_file" ]]; then
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  service=$(sed -n -E 's/^[[:space:]]*export[[:space:]]+UPDATE_SCRIPT_NAME=["'"'"']?([a-zA-Z0-9._-]+).*/\1/p' "$update_file" | head -n1)
+  [[ -z "$service" ]] && service=$(sed -n -E 's/^[[:space:]]*export[[:space:]]+SCRIPT_SLUG=["'"'"']?([a-zA-Z0-9._-]+).*/\1/p' "$update_file" | head -n1)
+  [[ -z "$service" ]] && service=$(grep -oE '/ct/[a-zA-Z0-9._-]+\.sh' "$update_file" 2>/dev/null | head -n1 | sed 's|.*/ct/||; s|\.sh$||')
+
+  rm -rf "$tmpdir"
 }
 
 function dry_run_container() {
@@ -444,27 +507,45 @@ for container in $CHOICE; do
     sleep 5
   fi
 
+  #0.5) Rewrite a retired Gitea base before anything reads it.
+  repair_update_url "$container"
+
   #1) Detect service using the service name in the update command
   detect_service $container
 
-  #1.1) If update script not detected, return
-  if [ -z "${service}" ]; then
-    echo -e "${YW}[WARN]${CL} Update script not found. Skipping to next container"
-    log_result "$container" "(unknown)" "SKIPPED" "No update script found in container"
-    log_write "Container $container: SKIPPED — no update script found"
+  #1.1) If update script not detected or service name is invalid, skip
+  if [ -z "${service}" ] || ! sanitize_service_name "${service}"; then
+    echo -e "${RD}[ERROR]${CL} Could not detect a valid service name for container $container"
+    log_result "$container" "(unknown)" "ERROR" "Invalid or missing service name in /usr/bin/update"
+    log_write "Container $container: ERROR — invalid or missing service name"
     continue
-  else
-    echo -e "${BL}[INFO]${CL} Detected service: ${GN}${service}${CL}"
-    log_write "Container $container: detected service '$service'"
   fi
 
+  resolved_service="$(resolve_service_script "${service}")"
+  if [ -z "${resolved_service}" ]; then
+    echo -e "${RD}[ERROR]${CL} Service '${service}' does not resolve to ct/${service}.sh"
+    log_result "$container" "${service}" "ERROR" "No matching ct/${service}.sh script found"
+    log_write "Container $container: ERROR — ct/${service}.sh not found"
+    continue
+  fi
+  if [ "${resolved_service}" != "${service}" ]; then
+    echo -e "${BL}[INFO]${CL} Script was renamed: ${service} -> ${GN}${resolved_service}${CL}"
+    log_write "Container $container: slug ${service} resolved to ${resolved_service}"
+    service="${resolved_service}"
+  fi
+
+  echo -e "${BL}[INFO]${CL} Detected service: ${GN}${service}${CL}"
+  log_write "Container $container: detected service '${service}'"
+
   #2) Extract service build/update resource requirements from config/installation file
-  script=$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/${service}.sh)
+  script=$(curl -fsSL "https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/${service}.sh")
 
   #2.1) Check if the script downloaded successfully
-  if [ $? -ne 0 ]; then
-    echo -e "${RD}[ERROR]${CL} Issue while downloading install script."
-    echo -e "${YW}[WARN]${CL} Unable to assess build resource requirements. Proceeding with current resources."
+  if [ $? -ne 0 ] || [ -z "${script}" ]; then
+    echo -e "${RD}[ERROR]${CL} Failed to download ct/${service}.sh"
+    log_result "$container" "${service}" "ERROR" "Failed to download ct/${service}.sh"
+    log_write "Container $container (${service}): ERROR — failed to download install script"
+    continue
   fi
 
   config=$(pct config "$container")

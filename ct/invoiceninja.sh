@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -35,21 +37,17 @@ function update_script() {
     systemctl stop supervisor nginx php8.4-fpm
     msg_ok "Stopped Services"
 
-    msg_info "Creating Backup"
-    mkdir -p /tmp/invoiceninja_backup
-    cp /opt/invoiceninja/.env /tmp/invoiceninja_backup/
-    cp -r /opt/invoiceninja/storage /tmp/invoiceninja_backup/ 2>/dev/null || true
-    cp -r /opt/invoiceninja/public/storage /tmp/invoiceninja_backup/public_storage 2>/dev/null || true
-    msg_ok "Created Backup"
+    create_backup /opt/invoiceninja/.env /opt/invoiceninja/storage /opt/invoiceninja/public/storage /opt/invoiceninja/vendor/beganovich/snappdf/versions
 
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "invoiceninja" "invoiceninja/invoiceninja" "prebuild" "latest" "/opt/invoiceninja" "invoiceninja.tar.gz"
 
-    msg_info "Restoring Data"
-    cp /tmp/invoiceninja_backup/.env /opt/invoiceninja/
-    cp -r /tmp/invoiceninja_backup/storage/* /opt/invoiceninja/storage/ 2>/dev/null || true
-    cp -r /tmp/invoiceninja_backup/public_storage/* /opt/invoiceninja/public/storage/ 2>/dev/null || true
-    rm -rf /tmp/invoiceninja_backup
-    msg_ok "Restored Data"
+    restore_backup
+
+    msg_info "Verifying Chromium for PDF Generation"
+    cd /opt/invoiceninja
+    $STD ./vendor/bin/snappdf download
+    chown -R www-data:www-data /opt/invoiceninja/vendor/beganovich/snappdf/versions
+    msg_ok "Verified Chromium for PDF Generation"
 
     msg_info "Running Migrations"
     cd /opt/invoiceninja 

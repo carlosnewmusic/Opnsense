@@ -21,7 +21,7 @@ PG_VERSION="17" setup_postgresql
 PG_DB_NAME="patchmon_db" PG_DB_USER="patchmon_usr" setup_postgresql_db
 
 RELEASE="v2.0.2"
-fetch_and_deploy_gh_release "PatchMon" "PatchMon/PatchMon" "singlefile" "latest" "/opt/patchmon" "patchmon-server-linux-amd64"
+fetch_and_deploy_gh_release "PatchMon" "PatchMon/PatchMon" "singlefile" "latest" "/opt/patchmon" "patchmon-server-linux-$(arch_resolve)"
 mv /opt/patchmon/PatchMon /opt/patchmon/patchmon-server
 
 msg_info "Configuring PatchMon"
@@ -60,6 +60,7 @@ REDIS_PORT=6379
 # OIDC_ENFORCE_HTTPS=true
 
 AGENT_BINARIES_DIR=/opt/patchmon/agents
+SSG_CONTENT_DIR=/opt/patchmon/ssg-content
 EOF
 msg_ok "Configured PatchMon"
 
@@ -84,6 +85,14 @@ for arch in "${AGENT_NAME[@]}"; do
   [[ "${arch}" != *.exe ]] && chmod 755 "/opt/patchmon/agents/patchmon-agent-${arch}"
 done
 msg_ok "Fetched PatchMon agent binaries"
+
+msg_info "Fetching SCAP Content"
+RELEASE=$(get_latest_github_release "ComplianceAsCode/content")
+curl_with_retry "https://github.com/ComplianceAsCode/content/releases/download/v${RELEASE}/scap-security-guide-${RELEASE}.tar.gz" "/tmp/ssg.tar.gz"
+mkdir -p /opt/patchmon/ssg-content
+tar -xzf /tmp/ssg.tar.gz -C /opt/patchmon/ssg-content --strip-components=1 --wildcards '*/ssg-*-ds.xml'
+rm -f /tmp/ssg.tar.gz
+msg_ok "Fetched SCAP Content"
 
 msg_info "Creating service"
 cat <<EOF >/etc/systemd/system/patchmon-server.service

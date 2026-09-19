@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: liecno
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -28,6 +30,9 @@ function update_script() {
     msg_error "No ${APP} installation found!"
     exit
   fi
+
+  NODE_VERSION="24" NODE_MODULE="playactor" setup_nodejs
+
   if check_for_gh_release "ps5-mqtt" "FunkeyFlo/ps5-mqtt"; then
     msg_info "Stopping service"
     systemctl stop ps5-mqtt

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: Michel Roegl-Brunner (michelroegl-brunner)
 # License: | MIT https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -146,7 +148,7 @@ function update_script() {
 
   # Check and upgrade optional extensions
   # TOTP Extension
-  if [[ -f /etc/guacamole/extensions/guacamole-auth-totp-*.jar ]]; then
+  if compgen -G "/etc/guacamole/extensions/guacamole-auth-totp-*.jar" >/dev/null; then
     msg_info "Updating TOTP Extension"
     rm -f /etc/guacamole/extensions/guacamole-auth-totp-*.jar
     curl_download "/tmp/guacamole-auth-totp.tar.gz" "https://downloads.apache.org/guacamole/${LATEST_SERVER}/binary/guacamole-auth-totp-${LATEST_SERVER}.tar.gz"
@@ -158,7 +160,7 @@ function update_script() {
   fi
 
   # DUO Extension
-  if [[ -f /etc/guacamole/extensions/guacamole-auth-duo-*.jar ]]; then
+  if compgen -G "/etc/guacamole/extensions/guacamole-auth-duo-*.jar" >/dev/null; then
     msg_info "Updating DUO Extension"
     rm -f /etc/guacamole/extensions/guacamole-auth-duo-*.jar
     curl_download "/tmp/guacamole-auth-duo.tar.gz" "https://downloads.apache.org/guacamole/${LATEST_SERVER}/binary/guacamole-auth-duo-${LATEST_SERVER}.tar.gz"
@@ -170,7 +172,7 @@ function update_script() {
   fi
 
   # LDAP Extension
-  if [[ -f /etc/guacamole/extensions/guacamole-auth-ldap-*.jar ]]; then
+  if compgen -G "/etc/guacamole/extensions/guacamole-auth-ldap-*.jar" >/dev/null; then
     msg_info "Updating LDAP Extension"
     rm -f /etc/guacamole/extensions/guacamole-auth-ldap-*.jar
     curl_download "/tmp/guacamole-auth-ldap.tar.gz" "https://downloads.apache.org/guacamole/${LATEST_SERVER}/binary/guacamole-auth-ldap-${LATEST_SERVER}.tar.gz"
@@ -182,7 +184,7 @@ function update_script() {
   fi
 
   # Quick Connect Extension
-  if [[ -f /etc/guacamole/extensions/guacamole-auth-quickconnect-*.jar ]]; then
+  if compgen -G "/etc/guacamole/extensions/guacamole-auth-quickconnect-*.jar" >/dev/null; then
     msg_info "Updating Quick Connect Extension"
     rm -f /etc/guacamole/extensions/guacamole-auth-quickconnect-*.jar
     curl_download "/tmp/guacamole-auth-quickconnect.tar.gz" "https://downloads.apache.org/guacamole/${LATEST_SERVER}/binary/guacamole-auth-quickconnect-${LATEST_SERVER}.tar.gz"
@@ -194,7 +196,7 @@ function update_script() {
   fi
 
   # History Recording Storage Extension
-  if [[ -f /etc/guacamole/extensions/guacamole-history-recording-storage-*.jar ]]; then
+  if compgen -G "/etc/guacamole/extensions/guacamole-history-recording-storage-*.jar" >/dev/null; then
     msg_info "Updating History Recording Storage Extension"
     rm -f /etc/guacamole/extensions/guacamole-history-recording-storage-*.jar
     curl_download "/tmp/guacamole-history-recording-storage.tar.gz" "https://downloads.apache.org/guacamole/${LATEST_SERVER}/binary/guacamole-history-recording-storage-${LATEST_SERVER}.tar.gz"

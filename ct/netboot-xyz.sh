@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
+_CS_DEFAULT_URL="https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main"
+_cs_boot="${COMMUNITY_SCRIPTS_CORE_DIR:-$(dirname "${BASH_SOURCE[0]}")/../../core}/core/build.func"
+source "$_cs_boot" 2>/dev/null || source <(curl -fsSL "${COMMUNITY_SCRIPTS_CORE_URL:-https://raw.githubusercontent.com/community-scripts/core/main}/core/build.func")
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: MickLesk (CanbiZ)
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -12,7 +14,7 @@ var_ram="${var_ram:-512}"
 var_disk="${var_disk:-8}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
-var_arm64="${var_arm64:-no}"
+var_arm64="${var_arm64:-yes}"
 var_unprivileged="${var_unprivileged:-1}"
 
 header_info "$APP"
@@ -56,6 +58,14 @@ function update_script() {
     USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-linux-bin" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-linux.bin"
     USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-dsk" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz.dsk"
     USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-pdsk" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz.pdsk"
+
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-legacy-efi" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-legacy.efi"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-legacy-kpxe" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-legacy.kpxe"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-legacy-lkrn" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-legacy.lkrn"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-legacy-dsk" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-legacy.dsk"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-legacy-pdsk" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-legacy.pdsk"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-metal-legacy-efi" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-metal-legacy.efi"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-metal-legacy-kpxe" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-metal-legacy.kpxe"
     USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-arm64" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-arm64.efi"
     USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-arm64-snp" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-arm64-snp.efi"
     USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-arm64-snponly" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-arm64-snponly.efi"
@@ -68,6 +78,12 @@ function update_script() {
     USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-arm64-img" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-arm64.img"
     USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-multiarch-iso" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-multiarch.iso"
     USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-multiarch-img" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-multiarch.img"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-legacy-iso" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-legacy.iso"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-legacy-img" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-legacy.img"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-sb-iso" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-sb.iso"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-sb-img" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-sb.img"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-sb-arm64-iso" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-sb-arm64.iso"
+    USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-sb-arm64-img" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-sb-arm64.img"
     USE_ORIGINAL_FILENAME=true fetch_and_deploy_gh_release "netboot-xyz-checksums" "netbootxyz/netboot.xyz" "singlefile" "latest" "/var/www/html" "netboot.xyz-sha256-checksums.txt"
 
     msg_info "Restoring Configuration"

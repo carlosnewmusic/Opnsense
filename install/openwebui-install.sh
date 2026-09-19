@@ -25,12 +25,37 @@ setup_hwaccel
 
 PYTHON_VERSION="3.12" setup_uv
 
+OTEL_ARGS=()
+read -r -p "${TAB3}Would you like to install OpenTelemetry instrumentation packages (requires manual .env configuration)? <y/N> " prompt
+if [[ ${prompt,,} =~ ^(y|yes)$ ]]; then
+  for pkg in \
+    opentelemetry-api \
+    opentelemetry-sdk \
+    opentelemetry-exporter-otlp \
+    opentelemetry-exporter-otlp-proto-http \
+    opentelemetry-instrumentation-fastapi \
+    opentelemetry-instrumentation-aiohttp-client \
+    opentelemetry-instrumentation-httpx \
+    opentelemetry-instrumentation-sqlalchemy \
+    opentelemetry-instrumentation-requests \
+    opentelemetry-instrumentation-logging \
+    opentelemetry-instrumentation-redis \
+    opentelemetry-instrumentation-system-metrics; do
+    OTEL_ARGS+=(--with "$pkg")
+  done
+fi
+
 msg_info "Installing Open WebUI"
-$STD uv tool install --python 3.12 --constraint <(echo "numba>=0.60") open-webui[all]
+export UV_HTTP_TIMEOUT=300
+for attempt in $(seq 1 3); do
+  $STD uv tool install --python 3.12 --constraint <(echo "numba>=0.60") "${OTEL_ARGS[@]}" open-webui[all] && break
+  [[ $attempt -lt 3 ]] && msg_warn "Open WebUI install attempt $attempt failed, retrying..." && sleep 10
+done
 msg_ok "Installed Open WebUI"
 
 read -r -p "${TAB3}Would you like to add Ollama? <y/N> " prompt
 if [[ ${prompt,,} =~ ^(y|yes)$ ]]; then
+  if [[ "$(arch_resolve)" == "amd64" ]]; then
   msg_info "Setting up Intel® Repositories"
   mkdir -p /usr/share/keyrings
   curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | gpg --dearmor -o /usr/share/keyrings/intel-graphics.gpg 2>/dev/null || true
@@ -71,9 +96,10 @@ EOF
   msg_info "Installing Intel® oneAPI Base Toolkit (Patience)"
   $STD apt install -y --no-install-recommends intel-basekit-2024.1 2>/dev/null || true
   msg_ok "Installed Intel® oneAPI Base Toolkit"
+  fi
 
   msg_info "Installing Ollama"
-  if ! fetch_and_deploy_gh_release "ollama-com" "ollama/ollama" "prebuild" "latest" "/usr/lib/ollama" "ollama-linux-amd64.tar.zst"; then
+  if ! fetch_and_deploy_gh_release "ollama-com" "ollama/ollama" "prebuild" "latest" "/usr/lib/ollama" "ollama-linux-$(arch_resolve).tar.zst"; then
     msg_error "Failed to download or deploy Ollama – check network connectivity and GitHub API availability"
   else
     ln -sf /usr/lib/ollama/bin/ollama /usr/bin/ollama
