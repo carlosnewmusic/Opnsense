@@ -4,9 +4,10 @@
 # Author: michelroegl-brunner
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 #
-# OPNsense VM - Instalación desde imagen oficial VGA
-# Sin bootstrap, sin dependencia de red durante la instalación.
-# Instala OPNsense en el disco con opnsense-installer y configura la red.
+# OPNsense VM - Instalación desde imagen NANO oficial (preinstalada)
+# - No requiere instalador, no depende de red durante la instalación.
+# - Escribe la imagen nano directamente en el disco de la VM.
+# - Configura la red (LAN estática y WAN DHCP) tras el arranque.
 
 LOG_FILE="${LOG_FILE:-/var/log/opnsense-vm-install.log}"
 DEBUG_SERIAL="${DEBUG_SERIAL:-0}"
@@ -28,7 +29,7 @@ log_ok()   { log "OK   " "$@"; }
 exec > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2)
 
 log_info "==============================================================="
-log_info "OPNsense VM install (imagen oficial VGA)"
+log_info "OPNsense VM install (imagen NANO oficial)"
 log_info "Versión: $OPNSENSE_VERSION"
 log_info "LAN estática: $LAN_STATIC_IP/$LAN_STATIC_PREFIX"
 log_info "DEBUG_SERIAL=$DEBUG_SERIAL  KEEP_ON_ERROR=$KEEP_ON_ERROR"
@@ -176,7 +177,7 @@ function dump_serial_tail() {
 
 # --- PROMPT ---
 if ! whiptail --backtitle "Proxmox VE Helper Scripts" --title "OPNsense VM" \
-     --yesno "Crear VM OPNsense (imagen oficial VGA)?" 10 58; then
+     --yesno "Crear VM OPNsense (imagen NANO oficial)?" 10 58; then
   header_info && echo -e "⚠ Cancelado\n" && exit
 fi
 
@@ -276,12 +277,12 @@ fi
 msg_ok "Storage: $STORAGE"
 msg_ok "VM ID: $VMID"
 
-# --- URL imagen OPNsense ---
-log_step "[06] Resolviendo imagen oficial OPNsense ${OPNSENSE_VERSION}"
-OPNSENSE_URL="https://pkg.opnsense.org/releases/${OPNSENSE_VERSION}/OPNsense-${OPNSENSE_VERSION}-vga-amd64.img.bz2"
+# --- URL imagen NANO ---
+log_step "[06] Resolviendo imagen NANO oficial OPNsense ${OPNSENSE_VERSION}"
+OPNSENSE_URL="https://pkg.opnsense.org/releases/${OPNSENSE_VERSION}/OPNsense-${OPNSENSE_VERSION}-nano-amd64.img.bz2"
 log_info "URL: $OPNSENSE_URL"
 if ! curl -fsIL "$OPNSENSE_URL" >/dev/null 2>&1; then
-  msg_error "Imagen OPNsense no encontrada en $OPNSENSE_URL"
+  msg_error "Imagen NANO no encontrada en $OPNSENSE_URL"
   exit 115
 fi
 msg_ok "Imagen disponible"
@@ -292,7 +293,7 @@ curl -f#SL -o "$(basename "$OPNSENSE_URL")" "$OPNSENSE_URL"; echo -en "\e[1A\e[0
 
 log_step "[09] Descomprimiendo"
 check_disk_space "$TEMP_DIR" 15 || { msg_error "Espacio insuficiente"; exit 214; }
-FILE="OPNsense.img"
+FILE="OPNsense-nano.img"
 bunzip2 -c "$(basename "$OPNSENSE_URL")" > "$FILE" || { msg_error "Fallo al descomprimir"; exit 115; }
 rm -f "$(basename "$OPNSENSE_URL")"; msg_ok "Descomprimido: $FILE"
 
@@ -346,7 +347,7 @@ qm set $VMID -efidisk0 ${DISK0_REF}${FORMAT} -scsi0 ${DISK1_REF},${DISK_CACHE}${
 qm resize $VMID scsi0 20G >/dev/null
 msg_ok "Discos OK"
 
-DESC="<div align='center'><h2>OPNsense VM (imagen oficial ${OPNSENSE_VERSION})</h2></div>"
+DESC="<div align='center'><h2>OPNsense VM (imagen NANO ${OPNSENSE_VERSION})</h2></div>"
 qm set $VMID -description "$DESC" >/dev/null
 
 if [ -n "$NET1_BRG" ]; then
@@ -357,7 +358,7 @@ fi
 
 log_info "VM config inicial:"; qm config $VMID 2>&1 | tee -a "$LOG_FILE"
 
-# --- ARRANQUE E INSTALACIÓN ---
+# --- ARRANQUE Y CONFIGURACIÓN ---
 log_step "[16] Iniciando VM"
 qm start $VMID
 sleep 5
@@ -367,11 +368,11 @@ serial_start || { msg_error "Serial no disponible"; exit 1; }
 sleep 3
 dump_serial_tail 20
 
-log_step "[18] Esperando login del live media"
-wait_for_pattern "login: ?$" 600 "Live login" || { dump_serial_tail 80; msg_error "Sin login"; exit 1; }
+log_step "[18] Esperando login de OPNsense"
+wait_for_pattern "login: ?$" 600 "OPNsense login" || { dump_serial_tail 80; msg_error "Sin login"; exit 1; }
 msg_ok "Login detectado"
 
-log_step "[19] Login como root en live media"
+log_step "[19] Login como root"
 send_line "root"
 sleep 2
 wait_for_pattern "Password:" 60 "Password" || true
@@ -379,68 +380,7 @@ send_line "opnsense"
 sleep 8
 dump_serial_tail 25
 
-log_step "[20] Verificando que estamos en live media"
-if ! wait_for_pattern "root@.*#" 30 "shell root"; then
-  msg_error "No se obtuvo shell root en live media"
-  exit 1
-fi
-msg_ok "Shell root en live media"
-
-log_step "[21] Lanzando opnsense-installer"
-msg_info "Ejecutando opnsense-installer (instalación automática)"
-send_line "opnsense-installer"
-sleep 5
-dump_serial_tail 30
-
-# El instalador es interactivo. Enviamos las respuestas conocidas:
-# 1. Seleccionar disco: vtbd0 (el disco de 20G)
-# 2. Particionado: Auto (UFS)
-# 3. Confirmar: y
-send_line "1"      # disco vtbd0
-sleep 5
-send_line "1"      # Auto (UFS)
-sleep 5
-send_line "y"      # confirmar
-sleep 10
-
-log_step "[22] Esperando fin de la instalación"
-el=0
-while [ $el -lt 900 ]; do
-  sleep 30; el=$((el+30))
-  if grep -qE "Installation complete|Reboot now|install.*complete" "$SERIAL_LOG" 2>/dev/null; then
-    log_info "Instalación completada ($((el/60)) min)"; break
-  fi
-  (( el % 120 == 0 )) && { log_info "Instalación: $((el/60)) min"; dump_serial_tail 10; }
-done
-msg_ok "Instalación finalizada (~$((el/60)) min)"
-sleep 20
-
-log_step "[23] Reiniciando tras instalación"
-# El instalador suele pedir reiniciar. Enviamos "reboot" o simplemente apagamos.
-qm shutdown $VMID --timeout 60 2>/dev/null || qm stop $VMID
-sleep 10
-msg_ok "VM apagada tras instalación"
-
-log_step "[24] Rearrancando desde disco instalado"
-qm start $VMID
-sleep 10
-serial_stop
-serial_start || { msg_error "Serial reader falló"; exit 1; }
-sleep 3
-
-log_step "[25] Esperando login de OPNsense instalado"
-wait_for_pattern "login: ?$" 600 "OPNsense login" || { dump_serial_tail 80; }
-msg_ok "Login OPNsense detectado"
-
-log_step "[26] Login root en OPNsense"
-send_line "root"
-sleep 2
-wait_for_pattern "Password:" 60 "Password" || true
-send_line "opnsense"
-sleep 8
-dump_serial_tail 25
-
-log_step "[27] Asignando interfaces (menú 1)"
+log_step "[20] Asignando interfaces (menú 1)"
 msg_info "Menú 1: asignar interfaces"
 send_line "1"; sleep 5
 send_line "n"; sleep 3
@@ -456,7 +396,7 @@ send_line ""; sleep 3
 send_line "y"; sleep 12
 dump_serial_tail 40
 
-log_step "[28] LAN IP estática"
+log_step "[21] LAN IP estática"
 if [ -n "$IP_ADDR" ] && [ -n "$NETMASK" ]; then
   msg_info "LAN: $IP_ADDR/$NETMASK"
   send_line "2"; sleep 5
@@ -475,10 +415,10 @@ if [ -n "$IP_ADDR" ] && [ -n "$NETMASK" ]; then
   msg_ok "LAN configurada: $IP_ADDR/$NETMASK"
 fi
 
-log_step "[29] Volviendo al menú"
+log_step "[22] Volviendo al menú"
 send_line "0"; sleep 4
 
-log_step "[30] Finalizado"
+log_step "[23] Finalizado"
 serial_stop || true
 msg_ok "OPNsense VM lista"
 echo
