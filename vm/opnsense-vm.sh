@@ -4,10 +4,8 @@
 # Author: michelroegl-brunner
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 #
-# OPNsense VM - Instalación desde imagen NANO oficial (preinstalada)
-# - No requiere instalador, no depende de red durante la instalación.
-# - Escribe la imagen nano directamente en el disco de la VM.
-# - Configura la red (LAN estática y WAN DHCP) tras el arranque.
+# OPNsense VM - Instalación desde imagen VGA oficial (arranque BIOS/Legacy)
+# ---------------------------------------------------------------------------
 
 LOG_FILE="${LOG_FILE:-/var/log/opnsense-vm-install.log}"
 DEBUG_SERIAL="${DEBUG_SERIAL:-0}"
@@ -29,7 +27,7 @@ log_ok()   { log "OK   " "$@"; }
 exec > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2)
 
 log_info "==============================================================="
-log_info "OPNsense VM install (imagen NANO oficial)"
+log_info "OPNsense VM install (imagen VGA oficial - arranque Legacy)"
 log_info "Versión: $OPNSENSE_VERSION"
 log_info "LAN estática: $LAN_STATIC_IP/$LAN_STATIC_PREFIX"
 log_info "DEBUG_SERIAL=$DEBUG_SERIAL  KEEP_ON_ERROR=$KEEP_ON_ERROR"
@@ -177,7 +175,7 @@ function dump_serial_tail() {
 
 # --- PROMPT ---
 if ! whiptail --backtitle "Proxmox VE Helper Scripts" --title "OPNsense VM" \
-     --yesno "Crear VM OPNsense (imagen NANO oficial)?" 10 58; then
+     --yesno "Crear VM OPNsense (imagen VGA oficial, arranque Legacy)?" 10 58; then
   header_info && echo -e "⚠ Cancelado\n" && exit
 fi
 
@@ -277,12 +275,12 @@ fi
 msg_ok "Storage: $STORAGE"
 msg_ok "VM ID: $VMID"
 
-# --- URL imagen NANO ---
-log_step "[06] Resolviendo imagen NANO oficial OPNsense ${OPNSENSE_VERSION}"
-OPNSENSE_URL="https://pkg.opnsense.org/releases/${OPNSENSE_VERSION}/OPNsense-${OPNSENSE_VERSION}-nano-amd64.img.bz2"
+# --- URL imagen VGA ---
+log_step "[06] Resolviendo imagen VGA oficial OPNsense ${OPNSENSE_VERSION}"
+OPNSENSE_URL="https://pkg.opnsense.org/releases/${OPNSENSE_VERSION}/OPNsense-${OPNSENSE_VERSION}-vga-amd64.img.bz2"
 log_info "URL: $OPNSENSE_URL"
 if ! curl -fsIL "$OPNSENSE_URL" >/dev/null 2>&1; then
-  msg_error "Imagen NANO no encontrada en $OPNSENSE_URL"
+  msg_error "Imagen VGA no encontrada en $OPNSENSE_URL"
   exit 115
 fi
 msg_ok "Imagen disponible"
@@ -293,7 +291,7 @@ curl -f#SL -o "$(basename "$OPNSENSE_URL")" "$OPNSENSE_URL"; echo -en "\e[1A\e[0
 
 log_step "[09] Descomprimiendo"
 check_disk_space "$TEMP_DIR" 15 || { msg_error "Espacio insuficiente"; exit 214; }
-FILE="OPNsense-nano.img"
+FILE="OPNsense-vga.img"
 bunzip2 -c "$(basename "$OPNSENSE_URL")" > "$FILE" || { msg_error "Fallo al descomprimir"; exit 115; }
 rm -f "$(basename "$OPNSENSE_URL")"; msg_ok "Descomprimido: $FILE"
 
@@ -311,43 +309,37 @@ DISK0_REF="${STORAGE}:${DISK_REF}${DISK0}"
 DISK1_REF="${STORAGE}:${DISK_REF}${DISK1}"
 log_info "DISK0_REF=$DISK0_REF  DISK1_REF=$DISK1_REF"
 
-# --- CREAR VM (dos NICs desde el principio) ---
-log_step "[11] qm create"
-msg_info "Creando VM"
+# --- CREAR VM (BIOS Legacy, dos NICs) ---
+log_step "[11] qm create (Legacy BIOS)"
+msg_info "Creando VM con arranque Legacy"
 if [ -n "$WAN_BRG" ]; then
   NET0_BRG="$WAN_BRG"; NET0_MAC="$WAN_MAC"
   NET1_BRG="$BRG";     NET1_MAC="$MAC"
 else
   NET0_BRG="$BRG"; NET0_MAC="$MAC"; NET1_BRG=""; NET1_MAC=""
 fi
-qm create $VMID ${MACHINE} -tablet 0 -localtime 1 -bios ovmf${CPU_TYPE} \
+qm create $VMID ${MACHINE} -tablet 0 -localtime 1 -bios seabios${CPU_TYPE} \
   -cores $CORE_COUNT -memory $RAM_SIZE -name $HN -tags community-script \
   -net0 virtio,bridge=$NET0_BRG,macaddr=$NET0_MAC$VLAN$MTU \
   -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
+# NOTA: Sin -efidisk0, ya que no usamos UEFI.
 
 log_step "[12] pvesm alloc"
-aa=1; am=4; ad=5
-while :; do
-  err=$(pvesm alloc $STORAGE $VMID $DISK0 4M 2>&1 >/dev/null) && break
-  if [[ "$err" == *"got timeout"* && $aa -lt $am ]]; then
-    pvesm free "${DISK0_REF}" &>/dev/null || true
-    sleep "$ad"; aa=$((aa+1)); ad=$((ad*2)); continue
-  fi
-  echo "$err" >&2; exit 220
-done
-msg_ok "efidisk asignada"
+# No se necesita efidisk para Legacy, pero el script original lo hacía.
+# Lo omitimos.
 
 log_step "[13] qm importdisk"
 qm importdisk $VMID ${FILE} $STORAGE ${DISK_IMPORT:-} &>/dev/null
 msg_ok "Importado"
 
 log_step "[14] qm set disks"
-qm set $VMID -efidisk0 ${DISK0_REF}${FORMAT} -scsi0 ${DISK1_REF},${DISK_CACHE}${THIN}size=2G \
+# Asignamos el disco importado como scsi0 y configuramos el orden de arranque.
+qm set $VMID -scsi0 ${DISK1_REF},${DISK_CACHE}${THIN}size=2G \
   -boot order=scsi0 -serial0 socket -tags community-script >/dev/null
 qm resize $VMID scsi0 20G >/dev/null
 msg_ok "Discos OK"
 
-DESC="<div align='center'><h2>OPNsense VM (imagen NANO ${OPNSENSE_VERSION})</h2></div>"
+DESC="<div align='center'><h2>OPNsense VM (imagen VGA ${OPNSENSE_VERSION})</h2></div>"
 qm set $VMID -description "$DESC" >/dev/null
 
 if [ -n "$NET1_BRG" ]; then
@@ -386,6 +378,7 @@ send_line "1"; sleep 5
 send_line "n"; sleep 3
 send_line "n"; sleep 3
 if [ -n "$WAN_BRG" ]; then
+  # En la imagen VGA, vtnet0 es la primera NIC (WAN) y vtnet1 la segunda (LAN)
   send_line "vtnet0"; sleep 4
   send_line "vtnet1"; sleep 4
 else
