@@ -318,39 +318,40 @@ qm create $VMID ${MACHINE} -tablet 0 -localtime 1 -bios seabios${CPU_TYPE} \
   -cores $CORE_COUNT -memory $RAM_SIZE -name $HN -tags community-script \
   -net0 virtio,bridge=$NET0_BRG,macaddr=$NET0_MAC$VLAN$MTU \
   -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
-# NOTA: Sin -efidisk0, ya que no usamos UEFI.
 
 log_step "[12] qm importdisk"
 msg_info "Importando disco (puede tardar)"
-# Capturamos la salida para extraer el nombre real del volumen
-IMPORT_OUTPUT=$(qm importdisk $VMID ${FILE} $STORAGE ${DISK_IMPORT:-} 2>&1) || {
-  msg_error "Fallo en qm importdisk"
-  log_err "$IMPORT_OUTPUT"
-  exit 220
-}
-log_info "Salida de qm importdisk: $IMPORT_OUTPUT"
+# Capturamos la salida (silenciamos el progreso que va a stdout)
+IMPORT_OUTPUT=$(qm importdisk $VMID ${FILE} $STORAGE ${DISK_IMPORT:-} 2>&1 | grep -v "^transferred" || true)
+log_info "Salida de qm importdisk:"
+echo "$IMPORT_OUTPUT" | tee -a "$LOG_FILE"
 
-# Extraer el nombre del volumen de la salida.
-# Ejemplo: "Successfully imported disk as 'unused0:local-zfs:vm-100-disk-1'"
-VOL_NAME=$(echo "$IMPORT_OUTPUT" | grep -oP "'unused0:\K[^']+" | head -n1)
+# Parseo robusto y portable con awk (sin grep -P)
+VOL_NAME=$(echo "$IMPORT_OUTPUT" | awk -F"'" '/successfully imported disk/ {print $2; exit}')
+# Fallback: si el formato no es el esperado, usar el patrón estándar
 if [ -z "$VOL_NAME" ]; then
-  # Intento alternativo: a veces la salida es "unused0:local-zfs:vm-100-disk-1"
-  VOL_NAME=$(echo "$IMPORT_OUTPUT" | grep -oP "unused0:\K\S+" | head -n1)
-fi
-if [ -z "$VOL_NAME" ]; then
-  msg_error "No se pudo detectar el nombre del volumen importado"
-  log_err "Salida completa: $IMPORT_OUTPUT"
-  exit 220
+  VOL_NAME="${STORAGE}:vm-${VMID}-disk-0"
+  log_warn "No se pudo detectar el nombre del volumen, usando fallback: $VOL_NAME"
 fi
 log_info "Volumen importado detectado: $VOL_NAME"
 
-# Esperar un momento a que ZFS registre el zvol
+# Verificar que el volumen existe antes de asignarlo
+if ! pvesm status --storage "$STORAGE" >/dev/null 2>&1; then
+  msg_error "Storage $STORAGE no responde"
+  exit 220
+fi
+
 sleep 5
 
 log_step "[13] qm set disks"
 msg_info "Asignando disco a scsi0"
-qm set $VMID -scsi0 "${VOL_NAME},${DISK_CACHE}${THIN}size=2G" \
-  -boot order=scsi0 -serial0 socket -tags community-script >/dev/null
+if ! qm set $VMID -scsi0 "${VOL_NAME},${DISK_CACHE}${THIN}size=2G" \
+    -boot order=scsi0 -serial0 socket -tags community-script >/dev/null 2>&1; then
+  msg_error "Fallo al asignar el disco a scsi0 con volumen '$VOL_NAME'"
+  log_err "Volúmenes disponibles en $STORAGE:"
+  pvesm list "$STORAGE" 2>&1 | tee -a "$LOG_FILE" || true
+  exit 220
+fi
 msg_ok "Disco asignado"
 
 log_step "[14] qm resize scsi0"
