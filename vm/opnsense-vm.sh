@@ -4,8 +4,10 @@
 # Author: michelroegl-brunner
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 #
-# OPNsense VM - Instalación desde imagen VGA oficial (BIOS Legacy)
-# ---------------------------------------------------------------------------
+# OPNsense VM - imagen SERIAL oficial (BIOS Legacy)
+# - La imagen serial escribe todo por ttyu0 (consola serie), que es lo que
+#   capturamos con socat. La imagen vga NO sirve para automatizar por serie.
+# - vtnet0 = LAN (vmbr0), vtnet1 = WAN (vmbr1) por defecto en OPNsense.
 
 LOG_FILE="${LOG_FILE:-/var/log/opnsense-vm-install.log}"
 DEBUG_SERIAL="${DEBUG_SERIAL:-0}"
@@ -27,7 +29,7 @@ log_ok()   { log "OK   " "$@"; }
 exec > >(tee -a "$LOG_FILE") 2> >(tee -a "$LOG_FILE" >&2)
 
 log_info "==============================================================="
-log_info "OPNsense VM install (imagen VGA oficial - arranque Legacy)"
+log_info "OPNsense VM install (imagen SERIAL oficial - Legacy BIOS)"
 log_info "Versión: $OPNSENSE_VERSION"
 log_info "LAN estática: $LAN_STATIC_IP/$LAN_STATIC_PREFIX"
 log_info "DEBUG_SERIAL=$DEBUG_SERIAL  KEEP_ON_ERROR=$KEEP_ON_ERROR"
@@ -67,7 +69,7 @@ trap 'post_update_to_api "failed" "129"; exit 129' SIGHUP
 function error_handler() {
   local ec="$?" line="$1" cmd="$2"
   log_err "ERROR line $line exit $ec: $cmd"
-  dump_serial_tail 40 2>/dev/null || true
+  dump_serial_tail 60 2>/dev/null || true
   post_update_to_api "failed" "$ec" 2>/dev/null || true
   [ "$KEEP_ON_ERROR" = "1" ] && log_warn "KEEP_ON_ERROR=1 -> VM $VMID NO destruida" \
     || { log_warn "Destruyendo VM $VMID"; cleanup_vmid; }
@@ -117,7 +119,7 @@ log_info "TEMP_DIR=$TEMP_DIR"
 pushd "$TEMP_DIR" >/dev/null
 
 # =============================================================================
-# CONSOLA SERIE (PTY bidireccional)
+# CONSOLA SERIE
 # =============================================================================
 SERIAL_PTY=""; SERIAL_LOG=""; SOCAT_PID=""; READER_PID=""
 
@@ -158,11 +160,14 @@ function send_line() {
 function wait_for_pattern() {
   local pat="$1" to="${2:-600}" label="${3:-$pat}" el=0
   [ -f "$SERIAL_LOG" ] || return 1
-  log_info "Esperando hasta ${to}s a '$label'"
+  log_info "Esperando hasta ${to}s a '$label' (regex: $pat)"
   while [ $el -lt "$to" ]; do
-    grep -qE "$pat" "$SERIAL_LOG" 2>/dev/null && { log_info "Match tras ${el}s"; return 0; }
+    if grep -qE "$pat" "$SERIAL_LOG" 2>/dev/null; then
+      log_info "Match tras ${el}s"
+      return 0
+    fi
     sleep 3; el=$((el+3))
-    (( el % 60 == 0 )) && log_info "  ... ${el}s / ${to}s"
+    (( el % 60 == 0 )) && { log_info "  ... ${el}s / ${to}s"; dump_serial_tail 5; }
   done
   log_warn "TIMEOUT '$label'"
   return 1
@@ -170,12 +175,12 @@ function wait_for_pattern() {
 
 function dump_serial_tail() {
   local n="${1:-30}"
-  [ -f "$SERIAL_LOG" ] && { log_info "--- últimas $n líneas ---"; tail -n "$n" "$SERIAL_LOG" | sed 's/^/  | /'; log_info "--- fin ---"; }
+  [ -f "$SERIAL_LOG" ] && { log_info "--- últimas $n líneas ---"; tail -n "$n" "$SERIAL_LOG" | sed 's/^/  | /' | tee -a "$LOG_FILE"; log_info "--- fin ---"; }
 }
 
 # --- PROMPT ---
 if ! whiptail --backtitle "Proxmox VE Helper Scripts" --title "OPNsense VM" \
-     --yesno "Crear VM OPNsense (imagen VGA oficial, arranque Legacy)?" 10 58; then
+     --yesno "Crear VM OPNsense (imagen SERIAL oficial, Legacy BIOS)?" 10 58; then
   header_info && echo -e "⚠ Cancelado\n" && exit
 fi
 
@@ -201,7 +206,7 @@ function get_available_bridges() { ip -o link show type bridge 2>/dev/null | awk
 
 function default_settings() {
   VMID=$(get_valid_nextid)
-  FORMAT=",efitype=4m"; MACHINE=""; DISK_CACHE=""; HN="opnsense"; CPU_TYPE=""
+  MACHINE=""; DISK_CACHE=""; HN="opnsense"; CPU_TYPE=""
   CORE_COUNT="4"; RAM_SIZE="8192"; BRG="vmbr0"
   IP_ADDR="$LAN_STATIC_IP"; NETMASK="$LAN_STATIC_PREFIX"; LAN_GW=""
   WAN_IP_ADDR=""; WAN_GW=""; WAN_NETMASK=""
@@ -275,12 +280,12 @@ fi
 msg_ok "Storage: $STORAGE"
 msg_ok "VM ID: $VMID"
 
-# --- URL imagen VGA ---
-log_step "[06] Resolviendo imagen VGA oficial OPNsense ${OPNSENSE_VERSION}"
-OPNSENSE_URL="https://pkg.opnsense.org/releases/${OPNSENSE_VERSION}/OPNsense-${OPNSENSE_VERSION}-vga-amd64.img.bz2"
+# --- URL imagen SERIAL ---
+log_step "[06] Resolviendo imagen SERIAL oficial OPNsense ${OPNSENSE_VERSION}"
+OPNSENSE_URL="https://pkg.opnsense.org/releases/${OPNSENSE_VERSION}/OPNsense-${OPNSENSE_VERSION}-serial-amd64.img.bz2"
 log_info "URL: $OPNSENSE_URL"
 if ! curl -fsIL "$OPNSENSE_URL" >/dev/null 2>&1; then
-  msg_error "Imagen VGA no encontrada en $OPNSENSE_URL"
+  msg_error "Imagen SERIAL no encontrada en $OPNSENSE_URL"
   exit 115
 fi
 msg_ok "Imagen disponible"
@@ -291,7 +296,7 @@ curl -f#SL -o "$(basename "$OPNSENSE_URL")" "$OPNSENSE_URL"; echo -en "\e[1A\e[0
 
 log_step "[09] Descomprimiendo"
 check_disk_space "$TEMP_DIR" 15 || { msg_error "Espacio insuficiente"; exit 214; }
-FILE="OPNsense-vga.img"
+FILE="OPNsense-serial.img"
 bunzip2 -c "$(basename "$OPNSENSE_URL")" > "$FILE" || { msg_error "Fallo al descomprimir"; exit 115; }
 rm -f "$(basename "$OPNSENSE_URL")"; msg_ok "Descomprimido: $FILE"
 
@@ -299,18 +304,20 @@ rm -f "$(basename "$OPNSENSE_URL")"; msg_ok "Descomprimido: $FILE"
 log_step "[10] Mapeando storage"
 STORAGE_TYPE=$(pvesm status -storage $STORAGE | awk 'NR>1 {print $2}')
 case $STORAGE_TYPE in
-nfs|dir)  DISK_EXT=".qcow2"; DISK_REF="$VMID/"; DISK_IMPORT="-format qcow2"; THIN="" ;;
-btrfs)    DISK_EXT=".raw";   DISK_REF="$VMID/"; DISK_IMPORT="-format raw";  FORMAT=",efitype=4m"; THIN="" ;;
-*)        DISK_EXT="";       DISK_REF="";        DISK_IMPORT="-format raw" ;;
+nfs|dir)  DISK_IMPORT="-format qcow2"; THIN="" ;;
+btrfs)    DISK_IMPORT="-format raw";   THIN="" ;;
+*)        DISK_IMPORT="-format raw" ;;
 esac
 log_info "Storage type: $STORAGE_TYPE"
 
-# --- CREAR VM (BIOS Legacy, dos NICs) ---
+# --- CREAR VM (BIOS Legacy) ---
+# IMPORTANTE: OPNsense asigna por defecto vtnet0 = LAN, vtnet1 = WAN.
+# Por eso net0 va a vmbr0 (LAN) y net1 va a vmbr1 (WAN).
 log_step "[11] qm create (Legacy BIOS)"
 msg_info "Creando VM con arranque Legacy"
 if [ -n "$WAN_BRG" ]; then
-  NET0_BRG="$WAN_BRG"; NET0_MAC="$WAN_MAC"
-  NET1_BRG="$BRG";     NET1_MAC="$MAC"
+  NET0_BRG="$BRG";     NET0_MAC="$MAC"      # vtnet0 = LAN
+  NET1_BRG="$WAN_BRG"; NET1_MAC="$WAN_MAC"  # vtnet1 = WAN
 else
   NET0_BRG="$BRG"; NET0_MAC="$MAC"; NET1_BRG=""; NET1_MAC=""
 fi
@@ -321,34 +328,22 @@ qm create $VMID ${MACHINE} -tablet 0 -localtime 1 -bios seabios${CPU_TYPE} \
 
 log_step "[12] qm importdisk"
 msg_info "Importando disco (puede tardar)"
-# Capturamos la salida (silenciamos el progreso que va a stdout)
 IMPORT_OUTPUT=$(qm importdisk $VMID ${FILE} $STORAGE ${DISK_IMPORT:-} 2>&1 | grep -v "^transferred" || true)
 log_info "Salida de qm importdisk:"
 echo "$IMPORT_OUTPUT" | tee -a "$LOG_FILE"
-
-# Parseo robusto y portable con awk (sin grep -P)
 VOL_NAME=$(echo "$IMPORT_OUTPUT" | awk -F"'" '/successfully imported disk/ {print $2; exit}')
-# Fallback: si el formato no es el esperado, usar el patrón estándar
 if [ -z "$VOL_NAME" ]; then
   VOL_NAME="${STORAGE}:vm-${VMID}-disk-0"
   log_warn "No se pudo detectar el nombre del volumen, usando fallback: $VOL_NAME"
 fi
 log_info "Volumen importado detectado: $VOL_NAME"
-
-# Verificar que el volumen existe antes de asignarlo
-if ! pvesm status --storage "$STORAGE" >/dev/null 2>&1; then
-  msg_error "Storage $STORAGE no responde"
-  exit 220
-fi
-
 sleep 5
 
 log_step "[13] qm set disks"
 msg_info "Asignando disco a scsi0"
 if ! qm set $VMID -scsi0 "${VOL_NAME},${DISK_CACHE}${THIN}size=2G" \
     -boot order=scsi0 -serial0 socket -tags community-script >/dev/null 2>&1; then
-  msg_error "Fallo al asignar el disco a scsi0 con volumen '$VOL_NAME'"
-  log_err "Volúmenes disponibles en $STORAGE:"
+  msg_error "Fallo al asignar el disco con volumen '$VOL_NAME'"
   pvesm list "$STORAGE" 2>&1 | tee -a "$LOG_FILE" || true
   exit 220
 fi
@@ -358,7 +353,7 @@ log_step "[14] qm resize scsi0"
 qm resize $VMID scsi0 20G >/dev/null
 msg_ok "Disco redimensionado a 20G"
 
-DESC="<div align='center'><h2>OPNsense VM (imagen VGA ${OPNSENSE_VERSION})</h2></div>"
+DESC="<div align='center'><h2>OPNsense VM (imagen SERIAL ${OPNSENSE_VERSION})</h2></div>"
 qm set $VMID -description "$DESC" >/dev/null
 
 if [ -n "$NET1_BRG" ]; then
@@ -379,63 +374,71 @@ serial_start || { msg_error "Serial no disponible"; exit 1; }
 sleep 3
 dump_serial_tail 20
 
+# OPNsense live media tarda ~1-2 min en arrancar. Esperamos al prompt de login.
+# El patrón es "login:" al final de línea (con posibles espacios).
 log_step "[18] Esperando login de OPNsense"
-wait_for_pattern "login: ?$" 600 "OPNsense login" || { dump_serial_tail 80; msg_error "Sin login"; exit 1; }
+wait_for_pattern "login:" 600 "OPNsense login" || { dump_serial_tail 80; msg_error "Sin login"; exit 1; }
 msg_ok "Login detectado"
 
 log_step "[19] Login como root"
 send_line "root"
-sleep 2
-wait_for_pattern "Password:" 60 "Password" || true
+sleep 3
+wait_for_pattern "Password:" 60 "Password prompt" || { dump_serial_tail 20; }
+msg_ok "Password prompt recibido"
 send_line "opnsense"
 sleep 8
-dump_serial_tail 25
+dump_serial_tail 40
 
-log_step "[20] Asignando interfaces (menú 1)"
+log_step "[20] Verificando shell root"
+wait_for_pattern "root@[^:]*:[^#]*#" 120 "root shell" || { dump_serial_tail 40; msg_error "Sin shell root"; exit 1; }
+msg_ok "Shell root en OPNsense (live)"
+
+log_step "[21] Asignando interfaces (menú 1)"
 msg_info "Menú 1: asignar interfaces"
-send_line "1"; sleep 5
-send_line "n"; sleep 3
-send_line "n"; sleep 3
+send_line "1"; sleep 5      # Assign interfaces
+send_line "n"; sleep 3      # No LAGGs
+send_line "n"; sleep 3      # No VLANs
 if [ -n "$WAN_BRG" ]; then
-  send_line "vtnet0"; sleep 4
-  send_line "vtnet1"; sleep 4
+  # vtnet0 ya es LAN por defecto; confirmamos vtnet1 como WAN
+  send_line "vtnet1"; sleep 4   # WAN
+  send_line "vtnet0"; sleep 4   # LAN
 else
   send_line "";       sleep 4
   send_line "vtnet0"; sleep 4
 fi
 send_line ""; sleep 3
 send_line "y"; sleep 12
-dump_serial_tail 40
+dump_serial_tail 50
 
-log_step "[21] LAN IP estática"
+log_step "[22] LAN IP estática en vmbr0 (vtnet0)"
 if [ -n "$IP_ADDR" ] && [ -n "$NETMASK" ]; then
   msg_info "LAN: $IP_ADDR/$NETMASK"
-  send_line "2"; sleep 5
-  send_line "2"; sleep 4
+  send_line "2"; sleep 5       # Set interface IP
+  send_line "2"; sleep 4       # LAN (opción 2)
   send_line "$IP_ADDR"; sleep 4
   send_line "$NETMASK"; sleep 4
-  send_line ""; sleep 4
-  send_line ""; sleep 4
-  send_line "y"; sleep 4
+  send_line ""; sleep 4        # Gateway vacío
+  send_line ""; sleep 4        # IPv6 vacío
+  send_line "y"; sleep 4       # DHCP server sí
   DS=$(echo "$IP_ADDR" | awk -F. '{print $1"."$2"."$3".100"}')
   DE=$(echo "$IP_ADDR" | awk -F. '{print $1"."$2"."$3".199"}')
   send_line "$DS"; sleep 4
   send_line "$DE"; sleep 4
-  send_line "n"; sleep 3
+  send_line "n"; sleep 3       # No revertir HTTP
   send_line ""; sleep 6
   msg_ok "LAN configurada: $IP_ADDR/$NETMASK"
 fi
 
-log_step "[22] Volviendo al menú"
+log_step "[23] Volviendo al menú"
 send_line "0"; sleep 4
 
-log_step "[23] Finalizado"
+log_step "[24] Finalizado"
 serial_stop || true
 msg_ok "OPNsense VM lista"
 echo
 msg_ok "WebUI: https://${IP_ADDR}"
 echo -e "${YW}Credenciales:${CL} root / opnsense"
-[ -n "$WAN_BRG" ] && echo -e "${YW}WAN:${CL} bridge ${WAN_BRG} (DHCP)"
-echo -e "${YW}LAN:${CL} bridge ${BRG} (${IP_ADDR}/${NETMASK})"
+[ -n "$WAN_BRG" ] && echo -e "${YW}WAN:${CL} bridge ${WAN_BRG} (DHCP) en vtnet1"
+echo -e "${YW}LAN:${CL} bridge ${BRG} (${IP_ADDR}/${NETMASK}) en vtnet0"
 echo -e "${YW}Log:${CL} $LOG_FILE"
 log_info "Script finalizado"
