@@ -5,9 +5,8 @@
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 #
 # OPNsense VM - imagen SERIAL oficial (BIOS Legacy)
-# - La imagen serial escribe todo por ttyu0 (consola serie), que es lo que
-#   capturamos con socat. La imagen vga NO sirve para automatizar por serie.
-# - vtnet0 = LAN (vmbr0), vtnet1 = WAN (vmbr1) por defecto en OPNsense.
+# IMPORTANTE: la imagen VGA (ttyv0) NO emite nada por el puerto serie.
+#             Hay que usar la imagen "-serial-amd64" (ttyu0).
 
 LOG_FILE="${LOG_FILE:-/var/log/opnsense-vm-install.log}"
 DEBUG_SERIAL="${DEBUG_SERIAL:-0}"
@@ -284,8 +283,16 @@ msg_ok "VM ID: $VMID"
 log_step "[06] Resolviendo imagen SERIAL oficial OPNsense ${OPNSENSE_VERSION}"
 OPNSENSE_URL="https://pkg.opnsense.org/releases/${OPNSENSE_VERSION}/OPNsense-${OPNSENSE_VERSION}-serial-amd64.img.bz2"
 log_info "URL: $OPNSENSE_URL"
+
+# SANITY CHECK: abortar si la URL no es la imagen serial
+if [[ "$OPNSENSE_URL" != *"-serial-"* ]]; then
+  msg_error "URL no es la imagen SERIAL. Abortando para evitar el fallo de ttyv0."
+  exit 1
+fi
+
 if ! curl -fsIL "$OPNSENSE_URL" >/dev/null 2>&1; then
   msg_error "Imagen SERIAL no encontrada en $OPNSENSE_URL"
+  msg_error "Verifica que exista en https://pkg.opnsense.org/releases/${OPNSENSE_VERSION}/"
   exit 115
 fi
 msg_ok "Imagen disponible"
@@ -311,8 +318,7 @@ esac
 log_info "Storage type: $STORAGE_TYPE"
 
 # --- CREAR VM (BIOS Legacy) ---
-# IMPORTANTE: OPNsense asigna por defecto vtnet0 = LAN, vtnet1 = WAN.
-# Por eso net0 va a vmbr0 (LAN) y net1 va a vmbr1 (WAN).
+# OPNsense asigna por defecto vtnet0 = LAN, vtnet1 = WAN.
 log_step "[11] qm create (Legacy BIOS)"
 msg_info "Creando VM con arranque Legacy"
 if [ -n "$WAN_BRG" ]; then
@@ -364,7 +370,7 @@ fi
 
 log_info "VM config inicial:"; qm config $VMID 2>&1 | tee -a "$LOG_FILE"
 
-# --- ARRANQUE Y CONFIGURACIÓN ---
+# --- ARRANQUE ---
 log_step "[16] Iniciando VM"
 qm start $VMID
 sleep 5
@@ -374,10 +380,10 @@ serial_start || { msg_error "Serial no disponible"; exit 1; }
 sleep 3
 dump_serial_tail 20
 
-# OPNsense live media tarda ~1-2 min en arrancar. Esperamos al prompt de login.
-# El patrón es "login:" al final de línea (con posibles espacios).
-log_step "[18] Esperando login de OPNsense"
-wait_for_pattern "login:" 600 "OPNsense login" || { dump_serial_tail 80; msg_error "Sin login"; exit 1; }
+# --- LOGIN ---
+log_step "[18] Esperando login de OPNsense (ttyu0)"
+# Con la imagen serial el prompt aparece en ttyu0 en ~1-2 min
+wait_for_pattern "login:" 600 "OPNsense login" || { dump_serial_tail 80; msg_error "Sin login en serie. ¿Usaste la imagen VGA por error?"; exit 1; }
 msg_ok "Login detectado"
 
 log_step "[19] Login como root"
@@ -399,7 +405,6 @@ send_line "1"; sleep 5      # Assign interfaces
 send_line "n"; sleep 3      # No LAGGs
 send_line "n"; sleep 3      # No VLANs
 if [ -n "$WAN_BRG" ]; then
-  # vtnet0 ya es LAN por defecto; confirmamos vtnet1 como WAN
   send_line "vtnet1"; sleep 4   # WAN
   send_line "vtnet0"; sleep 4   # LAN
 else
