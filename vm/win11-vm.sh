@@ -32,4 +32,4 @@ qm start 9000
 
 exit 0;
 
-bash -c "$(wget -qLO - https://gist.githubusercontent.com/guillaumebeyssac/4fe56484b4cb2bd5491ce6f52a75fbc2/raw/a2aca5cfff4ef713f60a59fa776ff5c28f928139/install-win10-proxmox.md"
+#bash -c "$(wget -qLO - https://raw.githubusercontent.com/carlosnewmusic/Opnsense/refs/heads/main/vm/win11-vm.sh"
