@@ -7,7 +7,7 @@ WIN11_ISO_URL="https://ts.buzzheavier.com/d/t3wgmn5p49ir?v=_tV1MLUQ9DZ34iNL2QhoJ
 wget -O /var/lib/vz/template/iso/Windows11.iso $WIN11_ISO_URL
 
 # Create a new VM in Proxmox
-qm create 9000 --name Windows11 --memory 8589 --cpu host --net0 virtio,bridge=vmbr0
+qm create 9000 --name Windows11 --memory 8192 --cpu host --net0 virtio,bridge=vmbr0
 
 # Add a SATA hard drive to the VM
 qm set 9000 --scsihw virtio-scsi-pci --scsi0 /var/lib/vz/images/9000/vm-9000-disk-0.qcow2,ssd=1,size=50G
