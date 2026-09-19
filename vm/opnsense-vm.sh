@@ -4,7 +4,7 @@
 # Author: michelroegl-brunner
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 #
-# OPNsense VM - Instalación desde imagen VGA oficial (arranque BIOS/Legacy)
+# OPNsense VM - Instalación desde imagen VGA oficial (BIOS Legacy)
 # ---------------------------------------------------------------------------
 
 LOG_FILE="${LOG_FILE:-/var/log/opnsense-vm-install.log}"
@@ -303,11 +303,7 @@ nfs|dir)  DISK_EXT=".qcow2"; DISK_REF="$VMID/"; DISK_IMPORT="-format qcow2"; THI
 btrfs)    DISK_EXT=".raw";   DISK_REF="$VMID/"; DISK_IMPORT="-format raw";  FORMAT=",efitype=4m"; THIN="" ;;
 *)        DISK_EXT="";       DISK_REF="";        DISK_IMPORT="-format raw" ;;
 esac
-DISK0="vm-${VMID}-disk-0${DISK_EXT}"
-DISK1="vm-${VMID}-disk-1${DISK_EXT}"
-DISK0_REF="${STORAGE}:${DISK_REF}${DISK0}"
-DISK1_REF="${STORAGE}:${DISK_REF}${DISK1}"
-log_info "DISK0_REF=$DISK0_REF  DISK1_REF=$DISK1_REF"
+log_info "Storage type: $STORAGE_TYPE"
 
 # --- CREAR VM (BIOS Legacy, dos NICs) ---
 log_step "[11] qm create (Legacy BIOS)"
@@ -324,20 +320,42 @@ qm create $VMID ${MACHINE} -tablet 0 -localtime 1 -bios seabios${CPU_TYPE} \
   -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
 # NOTA: Sin -efidisk0, ya que no usamos UEFI.
 
-log_step "[12] pvesm alloc"
-# No se necesita efidisk para Legacy, pero el script original lo hacía.
-# Lo omitimos.
+log_step "[12] qm importdisk"
+msg_info "Importando disco (puede tardar)"
+# Capturamos la salida para extraer el nombre real del volumen
+IMPORT_OUTPUT=$(qm importdisk $VMID ${FILE} $STORAGE ${DISK_IMPORT:-} 2>&1) || {
+  msg_error "Fallo en qm importdisk"
+  log_err "$IMPORT_OUTPUT"
+  exit 220
+}
+log_info "Salida de qm importdisk: $IMPORT_OUTPUT"
 
-log_step "[13] qm importdisk"
-qm importdisk $VMID ${FILE} $STORAGE ${DISK_IMPORT:-} &>/dev/null
-msg_ok "Importado"
+# Extraer el nombre del volumen de la salida.
+# Ejemplo: "Successfully imported disk as 'unused0:local-zfs:vm-100-disk-1'"
+VOL_NAME=$(echo "$IMPORT_OUTPUT" | grep -oP "'unused0:\K[^']+" | head -n1)
+if [ -z "$VOL_NAME" ]; then
+  # Intento alternativo: a veces la salida es "unused0:local-zfs:vm-100-disk-1"
+  VOL_NAME=$(echo "$IMPORT_OUTPUT" | grep -oP "unused0:\K\S+" | head -n1)
+fi
+if [ -z "$VOL_NAME" ]; then
+  msg_error "No se pudo detectar el nombre del volumen importado"
+  log_err "Salida completa: $IMPORT_OUTPUT"
+  exit 220
+fi
+log_info "Volumen importado detectado: $VOL_NAME"
 
-log_step "[14] qm set disks"
-# Asignamos el disco importado como scsi0 y configuramos el orden de arranque.
-qm set $VMID -scsi0 ${DISK1_REF},${DISK_CACHE}${THIN}size=2G \
+# Esperar un momento a que ZFS registre el zvol
+sleep 5
+
+log_step "[13] qm set disks"
+msg_info "Asignando disco a scsi0"
+qm set $VMID -scsi0 "${VOL_NAME},${DISK_CACHE}${THIN}size=2G" \
   -boot order=scsi0 -serial0 socket -tags community-script >/dev/null
+msg_ok "Disco asignado"
+
+log_step "[14] qm resize scsi0"
 qm resize $VMID scsi0 20G >/dev/null
-msg_ok "Discos OK"
+msg_ok "Disco redimensionado a 20G"
 
 DESC="<div align='center'><h2>OPNsense VM (imagen VGA ${OPNSENSE_VERSION})</h2></div>"
 qm set $VMID -description "$DESC" >/dev/null
@@ -378,7 +396,6 @@ send_line "1"; sleep 5
 send_line "n"; sleep 3
 send_line "n"; sleep 3
 if [ -n "$WAN_BRG" ]; then
-  # En la imagen VGA, vtnet0 es la primera NIC (WAN) y vtnet1 la segunda (LAN)
   send_line "vtnet0"; sleep 4
   send_line "vtnet1"; sleep 4
 else
