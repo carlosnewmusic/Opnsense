@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-# CONFIGURACIÓN (Ajustada a tu servidor 'nuc')
+# recomiendo descargar Windows 11 LTCS https://buzzheavier.com/t3wgmn5p49ir
 # ==========================================
 VMID=9000
 VM_NAME="Windows11"
